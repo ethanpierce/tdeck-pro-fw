@@ -2,7 +2,7 @@
 
 ## Target and verified references
 
-The user's photographs identify a **T-Deck Pro / A7682E**. The user confirmed **United States**, **T-Mobile SIM**, and **915 MHz LoRa**. The enclosure photos do not establish the PCB revision or prove LTE/voice service.
+The user's photographs identify a **T-Deck Pro / A7682E**. The bench device was identified as v1.1, in the **United States**, with **915 MHz LoRa**. An initial T-Mobile SIM did not register. An activated AT&T prepaid SIM subsequently registered on LTE Band 5 and delivered an outbound SMS. See the [dated bench record](BENCH_2026-10-16.md) for observed results and test limits.
 
 Hardware definitions were checked against LILYGO's repository:
 
@@ -53,9 +53,15 @@ The firmware emits the model, modem firmware revision, function mode, SIM state,
 
 ## Calls and audio
 
+LILYGO lists an onboard microphone and speaker for the [A7682E T-Deck Pro](https://lilygo.cc/products/t-deck-pro). The [v1.1 schematic](https://github.com/Xinyuan-LilyGO/T-Deck-Pro/blob/HD-V2-250915/hardware/T-Deckpro%20v1.1%2025-09-15/H693%20H779%20T-DeckPro%20V1.1%2025-09-15.pdf), pages 5–6, connects an analog microphone to the modem's `MICP/MICN` and a speaker connector to `SPK1P/SPK1N`; a 3.5 mm audio jack is also shown. A separate ESP32 PDM microphone is not the same audio path.
+
 The starter issues `ATD<number>;`, `ATA`, `AT+CHUP`, enables caller-number reporting and polls `AT+CLCC`. `AT+CHUP` avoids the modem's `ATH` behavior depending on `CVHU`. These are call controls. The modem's supported firmware, carrier provisioning/VoLTE/IMS acceptance and the board's microphone/speaker path determine whether usable voice is possible.
 
 No audio interface or routing setup has been validated. No claim is made that the current starter produces audible calls. If the modem's particular firmware lacks the required carrier voice support or the carrier rejects it, UI work cannot solve that requirement.
+
+An active LTE B5 connection, successful SMS and an active IMS PDP context do not prove IMS voice registration. The installed `A011B15A7682M7` firmware's AT&T voice profile has not been verified. Read-only USB queries include `modem AT*IMSRCFG="switch"`, `modem AT*IMSREAD`, `modem AT+CSDVC?`, `modem AT+CMUT?` and `modem AT+VMUTE?`. The IMS switch reports configuration, not registration. A call to a consenting test number, with speech checked in both directions, is still required.
+
+AT&T approval has not been established for this hardware. Its [approved-module catalog](https://www.business.att.com/content/dam/attbusiness/collateral/ATT_Approved_Modules.xlsx), updated October 6, 2026, contains no A7682E entry. SIMCom's published A7682E certifications do not list AT&T. Even an approved module does not automatically approve the finished device: [AT&T's current certification process](https://iotdevices.att.com/wp/get-certified.aspx) includes device RF/SIM testing, onboarding and identification. The normal IoT LTE requirements include B2/B4/B12, which this module lacks. Working at one B5 test location is not evidence of certification, broad coverage, voice acceptance or guaranteed continued service on a prepaid phone plan.
 
 ## LoRa
 

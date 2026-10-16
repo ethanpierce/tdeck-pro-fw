@@ -4,6 +4,33 @@
 #include <array>
 #include <cctype>
 namespace deck {
+CellularIndicator cellularIndicator(bool linked,bool simReady,int registration,int dbm,
+    const std::string& operatorInfo,const std::string& systemInfo) {
+    if(!linked)return {"...",0};
+    if(!simReady)return {"SIM",0};
+    if(registration==8 || registration==11)return {"SOS",0};
+    if(registration==2 || registration<0)return {"...",0};
+    const bool registered=registration==1 || registration==5 || registration==6 ||
+        registration==7 || registration==9 || registration==10;
+    if(!registered)return {"NO",0};
+    const char* label="NET";
+    auto fields=csv(operatorInfo);
+    if(fields.size()>=4) {
+        const auto& act=fields[3];
+        if(act=="7")label="LTE";
+        else if(act=="0" || act=="1" || act=="3")label="2G";
+        else if(act=="2" || act=="4" || act=="5" || act=="6")label="3G";
+    }
+    // COPS is polled regularly; use CPSI only until the access technology is known.
+    if(std::string(label)=="NET") {
+        if(systemInfo.rfind("LTE,",0)==0)label="LTE";
+        else if(systemInfo.rfind("GSM,",0)==0 || systemInfo.rfind("GPRS,",0)==0 || systemInfo.rfind("EDGE,",0)==0)label="2G";
+    }
+    if(registration==6 || registration==7)label="SMS";
+    uint8_t bars=0;
+    if(dbm>=-113 && dbm<=-51)bars=dbm>=-75?4:dbm>=-85?3:dbm>=-95?2:1;
+    return {label,bars};
+}
 std::vector<CarrierNetwork> parseCarrierScan(const std::string& line) {
     std::vector<CarrierNetwork> out;
     if(line.rfind("+COPS:",0)!=0 || line.size()>4096) return out;

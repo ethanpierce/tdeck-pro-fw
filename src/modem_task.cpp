@@ -204,7 +204,10 @@ private:
     }
     void network(const std::string& line) {
         int r=deck::registration(line);
-        if (r>=0) { reg_=r; emit(CellEventKind::Registration,"",r); }
+        if (r>=0) {
+            if(reg_!=r)diagnosticCount_=9; // Refresh CPSI after a registration transition.
+            reg_=r; emit(CellEventKind::Registration,"",r);
+        }
     }
     void urc(const std::string& line) {
         if (line=="RDY") offline("Modem restarted; reconnecting without retrying messages or calls");
@@ -215,8 +218,9 @@ private:
             auto f=deck::csv(valueAfterColon(line));
             if (f.size()==2 && f[0]=="SM") {
                 int slot=number(f[1],1,999);
-                if (slot>0 && smsReady() && engine_.idle()) readSlot(slot);
-                else scanRequired_=true;
+                if (slot<=0) return;
+                if (smsReady() && engine_.idle()) readSlot(slot);
+                else {scanRequired_=true;scanAttempted_=false;}
             } else emit(CellEventKind::Trace,"SMS in unsupported storage; only SIM (SM) inbox is read");
         } else if (line=="RING" || line.rfind("+CRING:",0)==0) {
             inCall_=true; callPollSoon_=true; emit(CellEventKind::Call,"Incoming call",4);
@@ -228,7 +232,7 @@ private:
             inCall_=false; emit(CellEventKind::Call,line,-1);
         } else if (line.rfind("VOICE CALL",0)==0) callPollSoon_=true;
     }
-    bool parsePdus(const deck::AtResult& r) {
+    bool parsePdus(const deck::AtResult& r, const char* store="SIM") {
         bool expected=false, received=false, delivered=true;
         for (const auto& line:r.lines) {
             if (line.rfind("+CMGR:",0)==0 || line.rfind("+CMGL:",0)==0) {
@@ -249,7 +253,7 @@ private:
                         seen_.push_back(id);
                     } else delivered=false; // Message remains on SIM; a later scan retries UI delivery.
                 }
-            } else emit(CellEventKind::Trace,"Unsupported SMS kept on SIM (multipart/sender/encoding)");
+            } else emit(CellEventKind::Trace,std::string("Unsupported SMS kept in ")+store+" storage (multipart/sender/encoding)");
         }
         if (!r.ok) emit(CellEventKind::Trace,"Inbox: "+r.final);
         return delivered && !expected && r.ok;
@@ -348,10 +352,77 @@ private:
             });
         });
     }
+    void traceLines(const deck::AtResult& r) {
+        for(const auto& line:r.lines)
+            for(size_t offset=0;offset<line.size();offset+=480)
+                emit(CellEventKind::Trace,line.substr(offset,480));
+    }
+    void restoreSimInbox(uint32_t generation) {
+        if(generation!=generation_ || !linked_) return; // Reconnect configures SM after a reset/timeout.
+        send("AT+CPMS=\"SM\"",[this,generation](const deck::AtResult& r){
+            if(generation!=generation_ || !linked_) return;
+            storage_=r.ok;
+            emit(CellEventKind::SmsReady,"",smsReady());
+            emit(CellEventKind::Trace,"SIM inbox restore: "+r.final);
+            if(!r.ok) {
+                // No slot may be read until configureSms has restored known SM storage.
+                smsSetupAttempted_=false;
+                emit(CellEventKind::Trace,"Inbox storage unknown; SMS setup will restore SIM storage before reading slots");
+            }
+        });
+    }
+    void inspectModemInbox() {
+        if(!smsReady() || configuring_ || !engine_.idle() || inCall_ || hasPendingCall_ || smsBusy_) {
+            emit(CellEventKind::Trace,"Modem busy or SMS setup unavailable; retry inbox-me shortly");return;
+        }
+        const uint32_t generation=generation_;
+        // CPMS mem1 controls CMGL/CMGR; leave mem2 and receive preference mem3 unchanged.
+        // Mark storage unavailable before the swap so an interleaved SM CMTI is
+        // deferred to a SIM scan instead of reading that slot number from ME.
+        storage_=false;
+        emit(CellEventKind::SmsReady,"",0);
+        emit(CellEventKind::Trace,"Inspecting ME inbox; raw messages may contain private data. Reads may mark messages read; none are deleted.");
+        send("AT+CPMS=\"ME\"",[this,generation](const deck::AtResult& selected){
+            if(generation!=generation_ || !linked_) return;
+            traceLines(selected);
+            if(!selected.ok) {
+                emit(CellEventKind::Trace,"ME inbox selection: "+selected.final);
+                restoreSimInbox(generation);return;
+            }
+            auto header=std::make_shared<std::string>();
+            deck::AtCommand command{"AT+CMGL=4",30000,"",false,
+                [this,header,generation](const deck::AtResult& r){
+                    if(generation!=generation_ || !linked_) return;
+                    if(r.uncertain) {
+                        offline("ME inbox timeout; reconnecting to restore SIM storage");return;
+                    }
+                    emit(CellEventKind::Trace,"ME inbox: "+(r.ok && !header->empty()?std::string("incomplete PDU"):r.final));
+                    restoreSimInbox(generation);
+                },
+                [this,header,generation](const std::string& line){
+                    if(generation!=generation_ || !linked_) return;
+                    for(size_t offset=0;offset<line.size();offset+=480)
+                        emit(CellEventKind::Trace,line.substr(offset,480));
+                    if(line.rfind("+CMGL:",0)==0) {*header=line;return;}
+                    if(!header->empty()) {
+                        parsePdus({true,false,"OK",{*header,line}},"modem (ME)");
+                        header->clear();
+                    }
+                }};
+            if(!engine_.enqueue(std::move(command))) {
+                emit(CellEventKind::Trace,"ME inbox: modem queue full");
+                restoreSimInbox(generation);
+            }
+        });
+    }
     void networkQuery(const std::string& cmd) {
+        if(cmd=="inbox-me") {inspectModemInbox();return;}
         static const char* allowed[]={"AT+CGDCONT?","AT+CGATT?","AT+CGACT?","AT+CNMP?",
             "AT+CNBP?","AT+CEER","AT+CEREG?","AT+CGREG?","AT+CEREG=?",
-            "AT+CFUN?","AT+CSQ","AT+COPS?","AT+CPSI?","AT+COPS=?","AT+CGSN","AT+CIMI"};
+            "AT+CFUN?","AT+CSQ","AT+COPS?","AT+CPSI?","AT+COPS=?","AT+CGSN","AT+CIMI","AT+CMGL=4",
+            "AT+CPMS?","AT+CNMI?","AT+CSMS?","AT+CGSMS?",
+            "AT*IMSRCFG=\"switch\"","AT*IMSREAD","AT+CSDVC?","AT+CSDVC=?",
+            "AT+CMUT?","AT+VMUTE?","AT+CMICGAIN?","AT+COUTGAIN?","AT+CLCC"};
         bool accepted=false;
         for(const char* value:allowed) if(cmd==value) accepted=true;
         if(!accepted) {emit(CellEventKind::Trace,"Unsupported read-only modem query");return;}
@@ -359,12 +430,10 @@ private:
             emit(CellEventKind::Trace,"Modem busy or offline; retry the query shortly");return;
         }
         emit(CellEventKind::Trace,"MODEM > "+cmd);
-        send(cmd,[cmd](const deck::AtResult& r){
-            for(const auto& line:r.lines)
-                for(size_t offset=0;offset<line.size();offset+=480)
-                    emit(CellEventKind::Trace,line.substr(offset,480));
+        send(cmd,[this,cmd](const deck::AtResult& r){
+            traceLines(r);
             emit(CellEventKind::Trace,cmd+": "+r.final);
-        },cmd=="AT+COPS=?"?180000:10000);
+        },cmd=="AT+COPS=?"?180000:cmd=="AT+CMGL=4"?30000:10000);
     }
     void handle(const CellAction& a) {
         if(a.kind==CellActionKind::SelectAutomatic) {

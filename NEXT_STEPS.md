@@ -18,16 +18,20 @@ not been integrated into Handheld OS.
 
 ## Cellular connection
 
-The A7682E responds and the SIM is ready, but normal network registration has
-not succeeded. A local scan detected AT&T (`310410`) and FirstNet (`313100`),
-with no T-Mobile entry. Later registration was denied. `fast.t-mobile.com` was
-saved and accepted by the modem; that does not resolve RF or carrier eligibility.
+An activated AT&T prepaid SIM registered at home on AT&T (`310410`), LTE Band 5,
+after saving `NXTGENPHONE` and restarting the modem. Packet attachment and active
+context 1 were confirmed. This demonstrates a connection at the test location;
+it does not establish carrier approval, coverage elsewhere, or long-term service.
+The earlier T-Mobile SIM did not register; its accepted APN could not resolve
+the modem's limited overlap with US T-Mobile radio bands.
 
-1. Check the antenna, intended location, SIM service and the exact modem/carrier
-   compatibility. The A7682E lacks most US T-Mobile bands; firmware cannot add them.
+1. Keep the APN matched to the activated SIM's plan. AT&T consumer LTE phone
+   service uses `NXTGENPHONE`; IoT/data plans may require another APN.
 2. Query `modem AT+CEREG?`, `modem AT+CSQ`, `modem AT+COPS?` and
    `modem AT+CPSI?`. An explicit `modem AT+COPS=?` scan can take three minutes;
    allow it to complete before more cellular work.
+   After a SIM change, use `modem restart`; `modem auto` requests automatic
+   selection when idle. Neither command sends a message or places a call.
 3. Proceed to consented two-way SMS only after an appropriate registration
    state. Test reception, submission, reset persistence and duplicate filtering.
 4. Test calls and microphone/speaker audio separately once carrier voice support
@@ -55,3 +59,18 @@ saved and accepted by the modem; that does not resolve RF or carrier eligibility
 
 Future app work: contacts, timestamps, Unicode fonts, message deletion, touch,
 interoperable radio protocols, audio setup and measured power management.
+
+## AI Chat and release testing
+
+AI Chat uses Wi-Fi and a configurable HTTPS Chat Completions endpoint. Its default
+is OpenAI `gpt-5.6-luna`; enter an API key in Settings I before an authenticated
+provider test. Host tests cover JSON, bounds, credential-safe errors and saved
+configuration. A real provider reply, physical editing and restart retention
+remain separate hardware checks. See [AI_CHAT.md](docs/AI_CHAT.md).
+
+Public firmware uses [the browser installer](https://ethanpierce.github.io/tdeck-pro-fw/)
+and separate simple [macOS](docs/INSTALL_MACOS.md) / [Windows](docs/INSTALL_WINDOWS.md)
+guides. Actual Windows hardware flashing is unverified. The current LoRa protocol
+still needs replacement/integration for the intended SMS plus Meshtastic messaging
+device; a Meshtastic-compatible leaf implementation is a candidate, not installed
+functionality.

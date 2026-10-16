@@ -209,5 +209,81 @@ int main(){
         bool completed=false;for(const auto& e:h.events())if(e.kind==CellEventKind::Trace&&std::string(e.text)=="Automatic network selection: OK")completed=true;
         assert(completed);std::cout<<"PASS slow automatic carrier selection completes and refreshes diagnostics\n";
     }
+    {
+        Harness h(2000);std::string store="SM";unsigned smScans=0,meScans=0;
+        const std::string pdu="00000B915155214365F700006210610000000005E8329BFD06";
+        h.custom=[&](const std::string& cmd,unsigned){
+            if(cmd=="AT+CPMS=\"ME\"") {
+                store="ME";
+                // A SIM notification must not read slot 7 from the temporarily selected ME store.
+                Serial1.feed("+CPMS: 1,100,0,100,0,100\r\nOK\r\n+CMTI: \"SM\",7\r\n");return true;
+            }
+            if(cmd=="AT+CPMS=\"SM\"")store="SM";
+            if(cmd.rfind("AT+CMGR=",0)==0)assert(store=="SM");
+            if(cmd!="AT+CMGL=4")return false;
+            if(store=="SM") {++smScans;Serial1.feed("OK\r\n");}
+            else {++meScans;Serial1.feed("+CMGL: 7,0,,20\r\n"+pdu+"\r\nOK\r\n");}
+            return true;
+        };
+        tickHook=[&]{if(current==500)h.request(CellActionKind::NetworkQuery,"inbox-me");};
+        h.run();assert(store=="SM" && h.smsReady() && smScans==2 && meScans==1);
+        assert(h.count["AT+CPMS=\"ME\""]==1 && h.count["AT+CPMS=\"SM\""]==1);
+        unsigned received=0;for(const auto& e:h.events())if(e.kind==CellEventKind::SmsIn) {
+            ++received;assert(std::string(e.text)=="hello");
+        }
+        assert(received==1 && h.totalPrefix("AT+CMGD")==0 && h.totalPrefix("AT+CMGS=")==0);
+        std::cout<<"PASS explicit ME inbox imports a message, defers interleaved SIM notification and restores SM without deleting or sending\n";
+    }
+    {
+        Harness h(2000);
+        h.custom=[&](const std::string& cmd,unsigned){
+            if(cmd!="AT+CPMS=\"ME\"")return false;
+            Serial1.feed("+CMS ERROR: 302\r\n");return true;
+        };
+        tickHook=[&]{if(current==500)h.request(CellActionKind::NetworkQuery,"inbox-me");};
+        h.run();assert(h.smsReady() && h.count["AT+CPMS=\"SM\""]==1 && h.count["AT+CMGL=4"]==1);
+        std::cout<<"PASS unavailable ME storage restores SM and does not scan the wrong inbox\n";
+    }
+    {
+        Harness h(2500);std::string store="SM";unsigned meScans=0;
+        h.custom=[&](const std::string& cmd,unsigned){
+            if(cmd=="AT+CPMS=\"ME\"")store="ME";
+            if(cmd=="AT+CPMS=\"SM\"") {
+                Serial1.feed("+CMS ERROR: 310\r\n+CMTI: \"SM\",4\r\n");return true;
+            }
+            if(cmd=="AT+CPMS=\"SM\",\"SM\",\"SM\"")store="SM";
+            if(cmd=="AT+CMGL=4" && store=="ME")++meScans;
+            if(cmd.rfind("AT+CMGR=",0)==0)assert(store=="SM");
+            return false;
+        };
+        tickHook=[&]{if(current==500)h.request(CellActionKind::NetworkQuery,"inbox-me");};
+        h.run();assert(store=="SM" && h.smsReady() && meScans==1);
+        assert(h.count["AT+CPMS=\"SM\",\"SM\",\"SM\""]==2 && h.count["AT+CMGL=4"]==3);
+        std::cout<<"PASS failed SM restore blocks slot reads until full SMS setup repairs the storage selection\n";
+    }
+    {
+        Harness h(41000);std::string store="SM";unsigned meScans=0;
+        h.custom=[&](const std::string& cmd,unsigned){
+            if(cmd=="AT+CPMS=\"ME\"")store="ME";
+            if(cmd=="AT+CPMS=\"SM\",\"SM\",\"SM\"")store="SM";
+            if(cmd=="AT+CMGL=4" && store=="ME") {++meScans;return true;}
+            return false;
+        };
+        tickHook=[&]{if(current==500)h.request(CellActionKind::NetworkQuery,"inbox-me");};
+        h.run();assert(store=="SM" && h.smsReady() && meScans==1 && h.count["AT"]==2);
+        assert(h.totalPrefix("AT+CMGS=")==0 && h.totalPrefix("AT+CMGD")==0 && h.totalPrefix("ATD")==0);
+        std::cout<<"PASS ME inbox timeout reconnects and restores SIM storage without repeating the probe or sending anything\n";
+    }
+    {
+        Harness h(2000);
+        h.custom=[&](const std::string& cmd,unsigned){return !cmd.empty()&&cmd.back()=='\x1a';};
+        tickHook=[&]{
+            if(current==500)h.action(CellActionKind::Sms,81);
+            if(current==600)h.request(CellActionKind::NetworkQuery,"inbox-me");
+        };
+        h.run();assert(h.totalPrefix("AT+CMGS=")==1 && h.count["AT+CPMS=\"ME\""]==0);
+        bool refused=false;for(const auto& e:h.events())if(e.kind==CellEventKind::Trace && std::string(e.text).find("retry inbox-me shortly")!=std::string::npos)refused=true;
+        assert(refused);std::cout<<"PASS ME inbox inspection refuses to interrupt an SMS\n";
+    }
     vQueueDelete(cellEvents);vQueueDelete(cellActions);cellEvents=cellActions=nullptr;
 }

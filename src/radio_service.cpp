@@ -2,10 +2,6 @@
 #include "board.h"
 #include "settings.h"
 #include <esp_system.h>
-namespace {
-volatile bool radioIrq=false;
-void IRAM_ATTR onRadioIrq() { radioIrq=true; }
-}
 RadioService::RadioService(): radio_(new Module(board::RadioCs,board::RadioIrq,board::RadioReset,board::RadioBusy)) {}
 bool RadioService::begin() {
     ready=false;
@@ -24,13 +20,13 @@ bool RadioService::begin() {
     if (error!=RADIOLIB_ERR_NONE) return false;
     error=radio_.setCRC(2);
     if (error!=RADIOLIB_ERR_NONE) return false;
-    radio_.setDio1Action(onRadioIrq);
+    // DIO1 stays asserted until flags are cleared. Poll it on the SPI owner
+    // rather than install a GPIO ISR through the framework's small IPC stack.
     initialized_=true;
     listen();
     return ready;
 }
 void RadioService::listen(int previousError) {
-    radioIrq=false;
     retryAt_=millis();
     const int state=radio_.startReceive();
     ready=state==RADIOLIB_ERR_NONE;
@@ -43,7 +39,6 @@ bool RadioService::send(const std::string& text,uint32_t id) {
     error=radio_.standby();
     if (error!=RADIOLIB_ERR_NONE) {listen(error); return false;}
     txTimeout_=1000U+2U*((radio_.getTimeOnAir(txBytes_.size())+999U)/1000U);
-    radioIrq=false;
     error=radio_.startTransmit(txBytes_.data(),txBytes_.size());
     if (error!=RADIOLIB_ERR_NONE) {listen(error); return false;}
     transmitting_=true; current_=id; started_=millis();
@@ -55,9 +50,7 @@ void RadioService::poll() {
         return;
     }
     const bool timedOut=transmitting_ && uint32_t(millis()-started_)>=txTimeout_;
-    // DIO1 remains high until its IRQ is cleared, covering a lost ISR flag.
-    if (!radioIrq && digitalRead(board::RadioIrq)==LOW && !timedOut) return;
-    radioIrq=false;
+    if (digitalRead(board::RadioIrq)==LOW && !timedOut) return;
     const uint32_t flags=radio_.getIrqFlags();
     if (transmitting_) {
         // finishTransmit() only clears IRQs and enters standby; it does not

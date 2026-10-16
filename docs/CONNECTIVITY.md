@@ -21,6 +21,23 @@ USB: `carriers` starts a scan; `carriers results` opens and prints cached result
 `modem AT+CGSN` reads the cellular modem's IMEI over USB. It is queried only on
 request and is not included in boot diagnostics or companion status.
 `modem AT+CIMI` reads the SIM's IMSI on request; keep that identifier private.
+`modem AT+CMGL=4` explicitly dumps raw SIM SMS PDUs over USB for codec diagnosis.
+It may mark messages as read but does not delete them; keep its output private.
+
+`modem inbox-me` explicitly inspects the modem's **ME** message storage. It
+temporarily selects ME for CPMS **mem1** (the store used by CMGL/CMGR), streams
+the raw PDUs to USB, imports supported incoming messages and restores mem1 to
+**SM**. It leaves mem2, the mem3 receiving preference and CNMI unchanged. The
+command refuses to interrupt a call, SMS or other modem operation. It sends no
+messages and deletes none, but reading can mark stored messages as read. Raw
+output can contain message contents and phone numbers; keep it private.
+
+SIM message notifications received during that inspection are deferred until
+SM is restored. If restoration fails, slot reads remain blocked while normal
+SMS setup repairs the storage selection; a timeout reconnects and reinitializes
+the modem. Use `modem AT+CPMS?` afterward to inspect the selected stores. ME
+inspection is an explicit diagnostic, not an automatic scan of every store.
+
 After swapping a SIM, `modem restart` requests one software restart of the
 cellular module and reinitializes its SIM, SMS setup and saved APN. It refuses
 while a call, SMS, scan or another command is active. A restart is never retried
@@ -34,6 +51,14 @@ For an AT&T consumer LTE phone SIM, AT&T lists `NXTGENPHONE`; its data-device
 profile uses `Broadband`, and IoT plans may have a separately provisioned APN.
 Use the APN supplied for the SIM's plan. See [AT&T's data settings](https://www.att.com/support/article-modal/wireless/KM1062162/).
 An accepted APN does not establish network registration or device eligibility.
+
+The top bar shows the cellular technology (`LTE`, `2G`, `3G`, or `NET` when
+unknown), four signal bars and battery percentage. Bars are a coarse CSQ/RSSI
+display: 1 below -95 dBm, 2 from -95, 3 from -85, and 4 from -75 dBm. Unknown
+signal leaves the bars empty. `...` means checking/searching, `SIM` means the
+SIM is not ready, `NO` means unregistered/denied, `SOS` means emergency-only,
+and `SMS` means SMS-only registration. Disconnected states never retain filled
+bars from an earlier connection. This indicator describes cellular service.
 
 ## Wi-Fi: Settings → W
 

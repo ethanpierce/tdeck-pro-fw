@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Paste your AI API key directly onto your connected T-Deck Pro over USB.">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'none'; form-action 'none'; base-uri 'none'">
+  <title>AI setup · Handheld OS</title>
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="ai-setup.js"></script>
+  <style>
+    label { display: block; font-weight: 650; margin: 20px 0 5px; }
+    input { width: 100%; padding: 12px; font: inherit; color: inherit; background: #fff; border: 1px solid #a9b5a8; border-radius: 8px; }
+    input:disabled { background: #f5f4ee; }
+    fieldset { margin: 0; padding: 0; border: 0; min-width: 0; }
+    .actions { display: flex; flex-wrap: wrap; gap: 12px; margin: 22px 0 10px; }
+    #setup-status { min-height: 3em; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="wordmark" href="./">HANDHELD OS</a>
+    <p class="eyebrow">Optional AI chat setup</p>
+    <h1>Paste your key.<br>Chat on your deck.</h1>
+    <p class="intro">Connect your T-Deck Pro, paste your API key, and save. This page sends settings directly to the device over USB.</p>
+    <p class="compatibility">Install the current Handheld OS release first and wait for its Home screen. Close other serial monitors and disconnect the installer tab.</p>
+
+    <section class="install-card" aria-labelledby="setup-title">
+      <h2 id="setup-title">Set up AI chat</h2>
+      <p>Use desktop Chrome or Edge on macOS or Windows. Keep the USB data cable connected.</p>
+      <div class="actions">
+        <button id="connect" type="button">Connect T-Deck Pro</button>
+        <button id="disconnect" type="button" disabled>Disconnect</button>
+      </div>
+      <p id="setup-status" role="status" aria-live="polite">Connect your device to begin. Nothing is sent to an AI provider during setup.</p>
+      <form id="setup-form" autocomplete="off">
+        <fieldset id="setup-fields" disabled>
+          <label for="endpoint">HTTPS API base URL</label>
+          <input id="endpoint" name="endpoint" type="url" value="https://api.openai.com/v1" maxlength="191" required autocomplete="off" autocapitalize="none" spellcheck="false" aria-describedby="endpoint-note">
+          <p id="endpoint-note" class="small">Keep this for OpenAI, or enter your own OpenAI-compatible provider's HTTPS API base.</p>
+          <label for="model">Model</label>
+          <input id="model" name="model" type="text" value="gpt-5.6-luna" maxlength="95" required autocomplete="off" autocapitalize="none" spellcheck="false">
+          <label for="api-key">API key</label>
+          <input id="api-key" name="api-key" type="password" maxlength="255" required autocomplete="off" autocapitalize="none" spellcheck="false" aria-describedby="key-note">
+          <p id="key-note" class="small">Use your provider's API key. An API account may have separate usage charges. This form replaces the saved key.</p>
+          <div class="actions"><button id="save" type="submit">Save to T-Deck Pro</button></div>
+        </fieldset>
+      </form>
+      <p class="small">Your key goes only to the attached USB device. This page has no analytics, backend or external scripts and does not save the key in browser storage. The device stores the key in unencrypted NVS; keep the device and its flash backups private.</p>
+      <noscript><p class="notice">Enable JavaScript to use USB setup. You can also enter settings directly on the device under Settings → I.</p></noscript>
+    </section>
+
+    <section aria-labelledby="next-title">
+      <h2 id="next-title">Then use the device</h2>
+      <p>After saving, press <kbd>A</kbd> on the device's AI setup screen, then <kbd>N</kbd> to write a question. <kbd>Enter</kbd> sends it to your selected provider. Connect Wi-Fi first in Settings → <kbd>W</kbd>.</p>
+      <p><kbd>J</kbd>/<kbd>K</kbd> pages through replies. <kbd>Sym</kbd> returns Home, where <kbd>A</kbd> opens AI chat again.</p>
+      <p class="small">Setup does not test the key or make an API request. If your provider rejects it, check your account's API access and exact model name. <a href="https://github.com/ethanpierce/tdeck-pro-fw/blob/main/docs/AI_CHAT.md">More AI setup help</a>.</p>
+    </section>
+    <footer><a href="./">Back to firmware installer</a> · An independent hobby project · GPL-3.0-only</footer>
+  </main>
+</body>
+</html>

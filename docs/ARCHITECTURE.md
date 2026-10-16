@@ -21,7 +21,7 @@ TCA8418 keys ├── main loop / e-paper UI ─── NVS message ring
 
 `src/modem_task.cpp` creates a dedicated cellular task on core 0. It owns UART1 and the AT engine, allowing modem bytes and unsolicited events to be processed while the main loop waits for an e-paper refresh. The main loop sends typed actions through a bounded FreeRTOS queue, and receives compact cellular events through another bounded queue. `status` exposes a dropped-event counter, which should remain zero during ordinary operation.
 
-`src/radio_service.cpp` owns the SX1262. IRQ handling only sets a flag; the main loop completes transmission, reads incoming packets and restarts receive. The display and radio share SPI with separate chip selects and are accessed by the same task. The radio uses asynchronous transmit/receive, but long main-loop display refreshes can still affect how quickly a received packet is serviced; hardware tests must establish practical receive behavior.
+`src/radio_service.cpp` owns the SX1262. The main loop polls its latched DIO1 interrupt pin, completes transmission, reads incoming packets and restarts receive. No GPIO ISR is installed: this avoids the ESP32-S3 framework's small IPC stack during interrupt setup. The display and radio share SPI with separate chip selects and are accessed by the same task. The radio uses asynchronous transmit/receive, but long main-loop display refreshes can still affect how quickly a received packet is serviced; hardware tests must establish practical receive behavior.
 
 ## Host-testable core
 

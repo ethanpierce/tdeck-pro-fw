@@ -3,6 +3,22 @@
 #include <iostream>
 #include <random>
 int main() {
+    auto indicator=[](bool linked,bool sim,int reg,int dbm,const char* cops,const char* system,const char* label,unsigned bars){
+        auto value=deck::cellularIndicator(linked,sim,reg,dbm,cops,system);
+        assert(std::string(value.label)==label && value.bars==bars);
+    };
+    indicator(true,true,1,-69,"0,2,\"310410\",7","NO SERVICE,Online","LTE",4);
+    indicator(true,true,5,-89,"0,0,\"Carrier\",3","LTE,Online","2G",2);
+    indicator(true,true,1,0,"0,2,\"310410\",7","","LTE",0);
+    indicator(true,true,1,-79,"Unknown","LTE,Online","LTE",3);
+    indicator(true,true,1,-107,"Unknown","Not queried","NET",1);
+    indicator(false,true,1,-69,"0,2,\"310410\",7","LTE,Online","...",0);
+    indicator(true,false,1,-69,"0,2,\"310410\",7","LTE,Online","SIM",0);
+    for(int reg:{0,3,4})indicator(true,true,reg,-69,"0,2,\"310410\",7","LTE,Online","NO",0);
+    for(int reg:{-1,2})indicator(true,true,reg,-69,"0,2,\"310410\",7","LTE,Online","...",0);
+    for(int reg:{8,11})indicator(true,true,reg,-69,"0,2,\"310410\",7","LTE,Online","SOS",0);
+    for(int reg:{6,7})indicator(true,true,reg,-95,"0,2,\"310410\",7","LTE,Online","SMS",2);
+    std::cout<<"PASS cellular header technology, signal levels and disconnected-state suppression\n";
     auto carriers=deck::parseCarrierScan("+COPS: (1,\"Test, LTE\",\"Test\",\"310410\",7),(3,\"Public safety\",\"PS\",\"313100\",7),,(0,1,2,3,4),(0,1,2)");
     assert(carriers.size()==2 && carriers[0].name=="Test, LTE" && carriers[0].status==1 && carriers[1].status==3);
     assert(deck::parseCarrierScan("+COPS: (9,\"Bad\",\"B\",\"310410\",7),(1,\"Bad\",\"B\",\"inject\",7)").empty());

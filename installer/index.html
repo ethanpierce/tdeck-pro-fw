@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Install Handheld OS on your LILYGO T-Deck Pro from Chrome or Edge. No command line required.">
+  <meta name="theme-color" content="#f5f4ee">
+  <title>Install Handheld OS</title>
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <main>
+    <a class="wordmark" href="https://github.com/ethanpierce/tdeck-pro-fw">HANDHELD OS</a>
+    <p class="eyebrow">A small OS for your pocket keyboard</p>
+    <h1>Plug in.<br>Make it yours.</h1>
+    <p class="intro">Install Handheld OS on your T-Deck Pro. All you need is a USB data cable and Chrome or Edge on a Mac or Windows PC.</p>
+    <p class="compatibility"><strong>T-Deck Pro v1.0 / v1.1 · A7682E · 915 MHz</strong><br>For this hardware only. T-Deck Pro MAX is unsupported.</p>
+
+    <section class="install-card" aria-labelledby="install-title">
+      <div class="card-heading"><h2 id="install-title">Ready in a few minutes</h2><span id="version" class="version">Loading release…</span></div>
+      <ol>
+        <li><strong>Connect your T-Deck Pro</strong><span>Use a USB data cable. Keep its battery connected.</span></li>
+        <li><strong>Click Connect below</strong><span>Choose the Espressif USB device or its COM port, then choose Install.</span></li>
+        <li><strong>Leave “Erase device” unchecked</strong><span>Continue with Next → Install. Keep the cable connected until it finishes.</span></li>
+      </ol>
+      <esp-web-install-button id="installer">
+        <button type="button" slot="activate" id="connect" disabled>Connect T-Deck Pro</button>
+        <p slot="unsupported" class="notice">Open this page in desktop <a href="https://www.google.com/chrome/">Google Chrome</a> or <a href="https://www.microsoft.com/edge/download">Microsoft Edge</a> on macOS or Windows to use this installer.</p>
+        <p slot="not-allowed" class="notice">Open the <a id="secure-link" href="https://ethanpierce.github.io/tdeck-pro-fw/">HTTPS installer</a> to connect your device.</p>
+      </esp-web-install-button>
+      <p id="load-status" role="status" aria-live="polite">Preparing the installer…</p>
+      <noscript><p class="notice">Enable JavaScript and reload this page to use the installer.</p></noscript>
+      <p class="small">This replaces your installed firmware and partition table. <a href="https://github.com/ethanpierce/tdeck-pro-fw/blob/main/docs/FLASHING.md">Back up first</a> if you need a factory restore. Leaving erase unchecked preserves saved Handheld OS settings and history.</p>
+    </section>
+
+    <section aria-labelledby="next-title">
+      <h2 id="next-title">Once it starts</h2>
+      <p>Wait for the Home screen. Press <kbd>S</kbd> for Settings, <kbd>W</kbd> to set up Wi-Fi, or <kbd>A</kbd> to set your carrier APN. Press <kbd>Sym</kbd> to return Home.</p>
+      <p>Press <kbd>M</kbd> for SMS. Cellular service requires an activated SIM, compatible LTE coverage and carrier approval. Carrier support varies.</p>
+      <p>Want AI chat? <a href="ai-setup.html">Paste your API key onto the device over USB</a>, then press <kbd>A</kbd> on Home to chat over Wi-Fi.</p>
+      <p class="small">Early test release. LoRa uses the Handheld OS protocol; Meshtastic is not included. Calls and Bluetooth pairing are still being tested. <a id="release-notes" href="https://github.com/ethanpierce/tdeck-pro-fw/releases">Read the release notes</a>.</p>
+    </section>
+
+    <details>
+      <summary>Device missing or installation stuck?</summary>
+      <ul>
+        <li>Try another USB data cable and a direct USB port.</li>
+        <li>Close serial monitors and other tabs connected to the device.</li>
+        <li>Hold <strong>BOOT</strong>, tap <strong>RST / RESET</strong>, release BOOT, then reconnect in the installer. Select the new Espressif USB / COM port if it changed.</li>
+        <li>After a successful install, tap RESET once if the Home screen does not appear.</li>
+      </ul>
+      <p>macOS and Windows 10/11 normally support the built-in Espressif USB connection without an extra driver. <a href="https://github.com/ethanpierce/tdeck-pro-fw/issues">Report a problem</a> with your hardware revision, browser and error message. Keep phone numbers and SIM identifiers out of screenshots.</p>
+    </details>
+
+    <section class="downloads" aria-labelledby="download-title">
+      <h2 id="download-title">Want a download?</h2>
+      <p>The same firmware, a shortcut back to this installer, and simple instructions for your computer. The browser installer needs an Internet connection.</p>
+      <div class="download-links"><a id="download-macos" aria-disabled="true">Download for macOS</a><a id="download-windows" aria-disabled="true">Download for Windows</a></div>
+      <p class="small"><a id="download-source" aria-disabled="true">Source code</a> · <a id="download-checksums" aria-disabled="true">SHA-256 checksums</a> · <a href="https://github.com/ethanpierce/tdeck-pro-fw">GitHub</a></p>
+    </section>
+    <footer>An independent hobby project · GPL-3.0-only · Hardware names identify compatible devices.</footer>
+  </main>
+</body>
+</html>

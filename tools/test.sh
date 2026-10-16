@@ -14,9 +14,12 @@ flags=(-std=c++17 -Wall -Wextra -Werror -g -O1
   lib/DeckCore/src/at_engine.cpp lib/DeckCore/src/connectivity.cpp -o build/settings_test
 "${CXX:-g++}" "${flags[@]}" tests/connectivity_test.cpp \
   lib/DeckCore/src/connectivity.cpp lib/DeckCore/src/at_engine.cpp -o build/connectivity_test
+"${CXX:-g++}" "${flags[@]}" -Itests/fakes -Isrc tests/ai_chat_test.cpp \
+  src/ai_settings.cpp lib/DeckCore/src/ai_protocol.cpp -o build/ai_chat_test
 # LeakSanitizer cannot attach under some sandbox ptrace policies; ASan/UBSan run normally.
 ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}" ./build/core_test
 ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}" ./build/store_test
 ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}" ./build/modem_service_test
 ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}" ./build/settings_test
 ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}" ./build/connectivity_test
+ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}" ./build/ai_chat_test

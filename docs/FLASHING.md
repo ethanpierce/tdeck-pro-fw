@@ -1,8 +1,18 @@
-# Build, back up and flash
+# Install, back up and build
 
 Target: ESP32-S3 T-Deck Pro v1.0/v1.1 with 16 MiB flash, 8 MiB QSPI PSRAM, A7682E and 915 MHz SX1262. T-Deck Pro MAX has a different hardware profile and is unsupported. The [2026-10-16 bench record](BENCH_2026-10-16.md) documents a verified original backup, successful upload, working hardware checks and remaining limitations.
 
-## Set up the local machine
+## Easy installation: macOS and Windows
+
+Open **[the Handheld OS installer](https://ethanpierce.github.io/tdeck-pro-fw/)** in desktop **Chrome or Edge**, connect the device with a USB data cable and leave its battery connected. Click **Connect T-Deck Pro**, choose the Espressif USB serial device, then choose **Install**. Leave **Erase device unchecked**, click **Next**, then **Install**. No Python or build tools are needed for this path.
+
+Follow the short **[macOS guide](INSTALL_MACOS.md)** or **[Windows guide](INSTALL_WINDOWS.md)**. The [v0.1.0 release](https://github.com/ethanpierce/tdeck-pro-fw/releases/tag/v0.1.0) also has a separate ZIP for each operating system; extract it and open `START-HERE.html`. Internet access is still required for the browser installer.
+
+Installation replaces the current OS and partition table. **The installer does not make a backup.** [Save a full flash backup](#save-the-factory-image-first) first if you need to restore the original firmware. That optional advanced procedure uses the command-line tools below. Leaving Erase device unchecked preserves Handheld OS settings/history in the existing NVS area; data from a different firmware or partition layout may not remain usable. Checking Erase device clears the entire ESP32 flash before installation.
+
+The release contains four separate images at their required offsets. It does not write to NVS at `0x9000–0xDFFF` unless the whole-chip erase option is selected. A single merged image can overwrite that area with padding, even when whole-chip erase is off.
+
+## Advanced: set up the local machine
 
 Use Python 3.12, Git and internet access for the first toolchain install. On Linux/macOS:
 
@@ -57,7 +67,7 @@ python -c "from pathlib import Path; import hashlib; p=Path('factory-16mb.bin');
 
 This backup is the ESP32 flash, including its firmware and stored data. It does not copy or update the A7682E's internal modem firmware or the SIM. Factory dumps may contain private data and should stay out of Git.
 
-## Upload the starter
+## Upload a source build
 
 Return to the repository, with its Python environment active:
 
@@ -93,22 +103,33 @@ PlatformIO writes these files under `.pio/build/tdeck-pro/`:
 | `firmware.elf` | Symbols for crash decoding and debugging |
 | `bootloader.bin` | ESP32-S3 bootloader at `0x0` |
 | `partitions.bin` | This project's partition table at `0x8000` |
+| `boot_app0.bin` | Boot metadata at `0xE000`; supplied by the Arduino framework under `tools/partitions/` |
 
 Use the PlatformIO upload command for a source build. Flashing the application alone over unknown factory partitions is insufficient.
 
-## Use the supplied prebuilt image
+## Advanced: flash the public release images
 
-The starter ZIP includes an ignored `firmware/` directory inside its Git working copy, containing `combined.bin`, individual images, `firmware.elf`, `BUILD_INFO.txt` and `SHA256SUMS`. Read the build information to match the image to its source commit. The combined image includes the bootloader at `0x0`, partitions at `0x8000`, `boot_app0.bin` at `0xE000` and the application at `0x10000`.
+Download and extract the macOS or Windows ZIP from the [v0.1.0 release](https://github.com/ethanpierce/tdeck-pro-fw/releases/tag/v0.1.0). Both contain the same firmware, plus platform-specific starter links and instructions. `BUILD_INFO.json` identifies the exact source commit and image hashes; `SHA256SUMS.txt` records the package file checksums. The complete project source is available in the release's `Handheld-OS-v0.1.0-source.zip` and at [source tag v0.1.0](https://github.com/ethanpierce/tdeck-pro-fw/tree/v0.1.0). Pinned dependencies and their sources are listed in [THIRD_PARTY.md](../THIRD_PARTY.md).
 
-With the original flash backup complete, enter download mode and flash the **combined** image at address `0x0`:
+After making a backup, close other port users, enter download mode and run this from the extracted package directory. Replace `PORT` with the device's actual port:
 
 ```sh
-python -m esptool --chip esp32s3 --port PORT --baud 115200 write_flash --flash_mode keep --flash_freq keep --flash_size keep 0x0 firmware/combined.bin
+python -m esptool --chip esp32s3 --port PORT --baud 115200 write_flash --flash_mode dio --flash_freq 80m --flash_size 16MB 0x0 firmware/bootloader.bin 0x8000 firmware/partitions.bin 0xE000 firmware/boot_app0.bin 0x10000 firmware/firmware.bin
 ```
 
-Reset normally, re-list the port and capture first boot as described above. The prebuilt firmware has the same hardware validation limits as a local source build.
+Write all four separate images. Do not run `erase_flash` for a normal update and do not install `firmware.bin` alone over unknown factory partitions. The public release uses DIO image headers for compatibility with the browser flasher. Reset normally, re-list the port and capture first boot as described above. Public images have the same hardware validation limits recorded in the release notes.
 
-To create a fresh handoff after later source changes, commit them, run `pio run -e tdeck-pro`, then `python tools/package.py`. The packaging tool requires a clean Git working tree and runs the pinned PlatformIO project build again to validate the images against the source. Release packaging rejects ignored `config/local.h` overrides; move intended release settings into tracked `config/settings.h` and commit them first. It produces a ZIP with a Git checkout, prebuilt images and checksums, and a separate Git bundle next to the repository. Output names may be changed with `--output` and `--bundle`.
+## Prepare a public release
+
+Commit the intended source changes, remove ignored `config/local.h` overrides, and run:
+
+```sh
+python tools/release.py --version v0.1.0
+```
+
+The release tool requires a clean checkout, rejects build overrides, performs a clean build, validates the target and partition boundaries, and stages OS ZIPs, a source archive of the exact commit, checksums and the browser installer under `build/release-v0.1.0/`. It does not flash a device or publish files. Read [the installer maintenance notes](../installer/README.md) before publishing the staged site and release assets. Use a new version and output directory for each later release.
+
+Older local handoff ZIPs may contain an ignored `firmware/combined.bin`, `BUILD_INFO.txt`, or a Git bundle produced by `tools/package.py`. These are historical local artifacts, **not the public release packages**. Do not use their merged images for an update or distribute those Git bundles. Use `tools/release.py`, which archives only the selected source commit and emits separate flash images.
 
 ## Restore the original device
 

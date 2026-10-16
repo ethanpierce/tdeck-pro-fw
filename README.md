@@ -1,19 +1,24 @@
 # Handheld OS
 
-A keyboard-first firmware foundation for the **LILYGO T-Deck Pro with an A7682E modem and 915 MHz SX1262 radio**. It runs on the ESP32-S3 using Arduino/FreeRTOS, with an e-paper home screen, SMS, call controls, LoRa chat, and USB diagnostics.
+A keyboard-first firmware foundation for the **LILYGO T-Deck Pro with an A7682E modem and 915 MHz SX1262 radio**. It runs on the ESP32-S3 using Arduino/FreeRTOS, with an e-paper home screen, SMS, AI chat over Wi-Fi, call controls, LoRa chat, and USB diagnostics.
+
+**[Install in your browser](https://ethanpierce.github.io/tdeck-pro-fw/)** — no build tools required.
+[macOS instructions](docs/INSTALL_MACOS.md) · [Windows instructions](docs/INSTALL_WINDOWS.md) · [Firmware downloads](https://github.com/ethanpierce/tdeck-pro-fw/releases)
 
 An independent hobby project. Hardware and carrier names identify compatible equipment and services; they do not imply affiliation or endorsement.
 
 **The A7682E is a poor match for T-Mobile in the United States.** SIMCom specifies LTE bands 1/3/5/7/8/20; it lacks T-Mobile's B2/B4/B12/B66/B71. B5 provides only limited possible overlap. Firmware and APN changes cannot add missing radio bands. LTE registration, SMS service, and especially VoLTE must be checked on the actual device before treating it as a phone. See [the hardware notes](docs/HARDWARE.md).
 
-This is a starter for hardware bring-up, with a firmware build and host-side protocol tests. **It was built, flashed and bench-tested on a v1.1 device on 2026-10-16.** E-paper, keyboard shortcuts, the Settings app, USB, modem/SIM response and LoRa initialization worked. The APN and light settings persisted across a restart. Wi-Fi setup joined a real network, and a Mac detected the BLE companion service; keyboard/phone pairing tests were deferred. The network scan found AT&T and FirstNet, but no T-Mobile entry; normal cellular registration did not succeed. See the [bench record](docs/BENCH_2026-10-16.md) for evidence and untested functions. Call audio and carrier voice support remain unverified. Continue with [NEXT_STEPS.md](NEXT_STEPS.md).
+This is a starter for hardware bring-up, with a firmware build and host-side protocol tests. **It was built, flashed and bench-tested on a v1.1 device on 2026-10-16.** E-paper, keyboard shortcuts, the Settings app, USB, modem/SIM response and LoRa initialization worked. The APN and light settings persisted across a restart. Wi-Fi setup joined a real network, and a Mac detected the BLE companion service; keyboard/phone pairing tests were deferred. An activated AT&T prepaid SIM subsequently registered on LTE Band 5 with `NXTGENPHONE`, and packet attachment and context 1 activation were confirmed. The earlier T-Mobile SIM did not register. See the [bench record](docs/BENCH_2026-10-16.md) for evidence and untested functions. Call audio and carrier voice support remain unverified. Continue with [NEXT_STEPS.md](NEXT_STEPS.md).
 
 ## Included
 
 | Feature | Starter behavior |
 | --- | --- |
 | Home screen | E-paper launcher, battery reading, registration and radio status |
+| Status bar | Cellular technology, four signal bars and battery percentage on every screen |
 | SMS | Compose/send a single GSM-7 message; import supported messages from SIM storage |
+| AI Chat | Configurable HTTPS OpenAI-compatible endpoint/model/key; defaults to OpenAI GPT-5.6 Luna; Wi-Fi required |
 | Phone | Dial, answer, hang up, incoming-call indication, modem call-state polling |
 | LoRa | Direct plaintext broadcasts between compatible Handheld OS peers at 915 MHz |
 | History | Last 16 combined SMS/LoRa messages in NVS, with integrity checks and duplicate filtering |
@@ -54,7 +59,7 @@ Replace the port with the actual device, such as `COM5` on Windows. PlatformIO u
 
 | Screen | Keys |
 | --- | --- |
-| Home | `M` Messages, `P` Phone, `L` LoRa, `D` diagnostics, `S` Settings; use lowercase/unshifted keys |
+| Home | `M` Messages, `P` Phone, `L` LoRa, `D` diagnostics, `A` AI Chat, `S` Settings; use lowercase/unshifted keys |
 | Any screen | `Sym` returns home and cancels the current draft |
 | Messages / LoRa | `N` compose, `J` next page, `K` previous page; hold `Alt` and press printed `1`–`4` to open a message |
 | Number entry | `W/E/R` → `1/2/3`, `S/D/F` → `4/5/6`, `Z/X/C` → `7/8/9`, `P` → `0`, `O` → `+`; no Alt needed |
@@ -62,7 +67,7 @@ Replace the port with the actual device, such as `COM5` on Windows. PlatformIO u
 | LoRa compose | Enter sends the broadcast |
 | Phone | Enter dials the entered number; `A` answers and `H` hangs up while a call is present |
 | Diagnostics | `R` reconnects/refreshes the modem; `I` imports the SIM inbox |
-| Settings | `A` APN, `C` carrier scan, `W` Wi-Fi, `B` BLE, `F/K` lights, `D` status, `R` modem refresh |
+| Settings | `A` APN, `I` AI setup, `C` carrier scan, `W` Wi-Fi, `B` BLE, `F/K` lights, `D` status, `R` modem refresh |
 | Carrier scan | `R` rescan, `J/K` results pages; up to three minutes |
 | Wi-Fi | `W` radio toggle, `R` scan, `J/K` select, Enter connect, `N` hidden SSID, `F` forget |
 | BLE | `B` radio toggle, `P` phone visibility, `R` discovery, `J/K` select, Enter keyboard pairing, `C` reconnect, `F/X` forget |
@@ -81,6 +86,8 @@ Press `S` on Home. Light changes save automatically in NVS; the front light is a
 
 See [connectivity setup](docs/CONNECTIVITY.md) for the carrier scan, Wi-Fi credentials, BLE keyboard support, phone GATT service and pairing controls. The ESP32-S3 supports Bluetooth LE; Bluetooth Classic keyboards are incompatible. Wi-Fi and BLE start disabled until explicitly enabled.
 
+Press **A** from Home for AI Chat, or **S → I** for its endpoint, model and masked API key. The default is OpenAI with `gpt-5.6-luna`; other providers must implement the HTTPS Chat Completions format. The API key is stored on the device, and conversations stay in RAM. AI uses Wi-Fi; it does not use the cellular modem's data connection. Provider authentication and generated replies remain unverified. See [AI setup and controls](docs/AI_CHAT.md).
+
 ## USB console
 
 Open at 115200 baud with newline endings, using `pio device monitor --port PORT --baud 115200` or another serial terminal. Close the terminal before flashing or running the capture script.
@@ -95,12 +102,14 @@ carriers results
 wifi
 wifi scan
 ble
-apn fast.t-mobile.com
+apn NXTGENPHONE
 light on
 keyboard-light off
 modem AT+CGDCONT?
 modem AT+CEREG?
 modem AT+COPS=?
+modem restart
+modem auto
 inbox
 scan-sim
 keys on
@@ -108,7 +117,7 @@ keys off
 home
 ```
 
-The modem command accepts a small allowlist of read-only network queries. An explicit `AT+COPS=?` scan can take up to three minutes and occupies the modem task while it runs; wait for the result before further cellular operations.
+The modem command accepts a small allowlist of read-only network queries. `modem restart` explicitly restarts the cellular module after a SIM change. `modem auto` requests automatic carrier selection. These operations refuse to interrupt active cellular work; automatic selection and an explicit `AT+COPS=?` scan can each take up to three minutes. Wait for completion before further cellular operations.
 
 These commands perform real sends/call operations when the necessary hardware and service are available:
 
