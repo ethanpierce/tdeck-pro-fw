@@ -197,5 +197,17 @@ int main(){
         assert(h.totalPrefix("AT+CMGS=")==0 && h.totalPrefix("ATD")==0);
         std::cout<<"PASS uncertain restart recovers the UART without automatically repeating the reset\n";
     }
+    {
+        Harness h(95000);uint32_t replyAt=0;
+        h.custom=[&](const std::string& cmd,unsigned){if(cmd!="AT+COPS=0")return false;replyAt=current+90000;return true;};
+        tickHook=[&]{
+            if(current==1000)h.action(CellActionKind::SelectAutomatic);
+            if(replyAt && current==replyAt)Serial1.feed("OK\r\n");
+        };
+        h.run();assert(h.count["AT+COPS=0"]==1 && h.count["AT"]==1 && h.count["AT+CGMM"]==2);
+        assert(h.totalPrefix("AT+CMGS=")==0 && h.totalPrefix("ATD")==0);
+        bool completed=false;for(const auto& e:h.events())if(e.kind==CellEventKind::Trace&&std::string(e.text)=="Automatic network selection: OK")completed=true;
+        assert(completed);std::cout<<"PASS slow automatic carrier selection completes and refreshes diagnostics\n";
+    }
     vQueueDelete(cellEvents);vQueueDelete(cellActions);cellEvents=cellActions=nullptr;
 }

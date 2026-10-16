@@ -367,6 +367,17 @@ private:
         },cmd=="AT+COPS=?"?180000:10000);
     }
     void handle(const CellAction& a) {
+        if(a.kind==CellActionKind::SelectAutomatic) {
+            if(!linked_ || !sim_ || configuring_ || !engine_.idle() || inCall_ || hasPendingCall_ || smsBusy_) {
+                emit(CellEventKind::Trace,"Modem busy or SIM unavailable; retry automatic selection when idle");return;
+            }
+            emit(CellEventKind::Trace,"Selecting a network automatically; up to 3 minutes");
+            send("AT+COPS=0",[this](const deck::AtResult& r){
+                emit(CellEventKind::Trace,"Automatic network selection: "+r.final);
+                if(linked_) diagnostics(true);
+            },180000);
+            return;
+        }
         if(a.kind==CellActionKind::Restart) {
             if(!linked_ || configuring_ || !engine_.idle() || inCall_ || hasPendingCall_ || smsBusy_) {
                 emit(CellEventKind::Trace,"Modem busy or offline; restart again when idle");return;

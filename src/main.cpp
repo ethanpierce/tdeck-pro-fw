@@ -290,6 +290,7 @@ void help() {
     Serial.println("help | status | diag | settings | inbox | scan-sim | home | keys on | keys off");
     Serial.println("apn <name> | light on/off | keyboard-light on/off | modem <read-only AT query>");
     Serial.println("modem restart (restart cellular modem after changing SIM)");
+    Serial.println("modem auto (request automatic carrier registration; up to 3 minutes)");
     Serial.println("carriers | wifi | wifi on/off/scan/forget | ble | ble on/off/scan/pair/reconnect | ble connect <1..24>");
     Serial.println("sms +15551234567|Hello | dial +15551234567 | answer | hangup | lora Hello");
     Serial.println("No messages/calls are sent at boot. LoRa is plaintext; no delivery acknowledgements.");
@@ -326,6 +327,7 @@ void command(String line) {
     else if(line=="light on" || line=="light off") saveLights(line=="light on",settings.values().keyboardLight);
     else if(line=="keyboard-light on" || line=="keyboard-light off") saveLights(settings.values().frontLight,line=="keyboard-light on");
     else if(line=="modem restart") action(CellActionKind::Restart);
+    else if(line=="modem auto") action(CellActionKind::SelectAutomatic);
     else if(line.startsWith("modem ")) action(CellActionKind::NetworkQuery,0,"",line.substring(6));
     else if(line=="diag") {action(CellActionKind::Refresh); inform("Diagnostics requested; watch USB output");}
     else if(line=="inbox") printInbox();

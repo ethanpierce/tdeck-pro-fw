@@ -25,6 +25,10 @@ After swapping a SIM, `modem restart` requests one software restart of the
 cellular module and reinitializes its SIM, SMS setup and saved APN. It refuses
 while a call, SMS, scan or another command is active. A restart is never retried
 automatically. `diag` and Settings R refresh status without restarting the module.
+`modem auto` requests automatic operator selection (`AT+COPS=0`) and then
+refreshes registration status. It can take three minutes and does not start
+unless the SIM is ready and the modem is idle. This operation is explicit;
+booting or scanning carriers does not change operator selection.
 
 For an AT&T consumer LTE phone SIM, AT&T lists `NXTGENPHONE`; its data-device
 profile uses `Broadband`, and IoT plans may have a separately provisioned APN.
