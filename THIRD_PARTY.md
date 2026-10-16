@@ -20,6 +20,9 @@ Direct dependencies are pinned in `platformio.ini`:
 | Adafruit BusIO | 1.16.2 | MIT; [source](https://github.com/adafruit/Adafruit_BusIO/tree/1.16.2), [license](docs/licenses/Adafruit-BusIO.txt) |
 | Adafruit TCA8418 | 1.0.2 | BSD-3-Clause; [source](https://github.com/adafruit/Adafruit_TCA8418/tree/1.0.2), [license](docs/licenses/Adafruit-TCA8418.txt) |
 | RadioLib | 7.1.2 | MIT; [source](https://github.com/jgromes/RadioLib/tree/7.1.2), [license](docs/licenses/RadioLib.txt) |
+| NimBLE-Arduino | 2.5.1 | Apache-2.0; Ryan Powell / h2zero and contributors; [source](https://github.com/h2zero/NimBLE-Arduino/tree/2.5.1), [license](docs/licenses/NimBLE-Arduino.txt) |
+
+The Wi-Fi implementation uses the pinned Arduino-ESP32 framework. NimBLE-Arduino includes its upstream NimBLE and related components; their copyright/license notices remain in the downloaded dependency.
 
 The framework includes Espressif/ESP-IDF, FreeRTOS and other upstream components under their respective licenses. PlatformIO downloads the toolchain/framework packages separately; retain their notices when redistributing those packages. The repository is not a vendored copy of the complete SDK or compiler.
 

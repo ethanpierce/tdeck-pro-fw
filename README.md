@@ -6,7 +6,7 @@ An independent hobby project. Hardware and carrier names identify compatible equ
 
 **The A7682E is a poor match for T-Mobile in the United States.** SIMCom specifies LTE bands 1/3/5/7/8/20; it lacks T-Mobile's B2/B4/B12/B66/B71. B5 provides only limited possible overlap. Firmware and APN changes cannot add missing radio bands. LTE registration, SMS service, and especially VoLTE must be checked on the actual device before treating it as a phone. See [the hardware notes](docs/HARDWARE.md).
 
-This is a starter for hardware bring-up, with a firmware build and host-side protocol tests. **It was built, flashed and bench-tested on a v1.1 device on 2026-10-16.** E-paper, keyboard shortcuts, the Settings app, USB, modem/SIM response and LoRa initialization worked. The APN and light settings persisted across a restart. The network scan found AT&T and FirstNet, but no T-Mobile entry; normal cellular registration did not succeed. See the [bench record](docs/BENCH_2026-10-16.md) for evidence and untested functions. Call audio and carrier voice support remain unverified. Continue with [NEXT_STEPS.md](NEXT_STEPS.md).
+This is a starter for hardware bring-up, with a firmware build and host-side protocol tests. **It was built, flashed and bench-tested on a v1.1 device on 2026-10-16.** E-paper, keyboard shortcuts, the Settings app, USB, modem/SIM response and LoRa initialization worked. The APN and light settings persisted across a restart. Wi-Fi setup joined a real network, and a Mac detected the BLE companion service; keyboard/phone pairing tests were deferred. The network scan found AT&T and FirstNet, but no T-Mobile entry; normal cellular registration did not succeed. See the [bench record](docs/BENCH_2026-10-16.md) for evidence and untested functions. Call audio and carrier voice support remain unverified. Continue with [NEXT_STEPS.md](NEXT_STEPS.md).
 
 ## Included
 
@@ -17,12 +17,14 @@ This is a starter for hardware bring-up, with a firmware build and host-side pro
 | Phone | Dial, answer, hang up, incoming-call indication, modem call-state polling |
 | LoRa | Direct plaintext broadcasts between compatible Handheld OS peers at 915 MHz |
 | History | Last 16 combined SMS/LoRa messages in NVS, with integrity checks and duplicate filtering |
-| Settings | On-device APN editor, screen/keyboard light toggles, saved preferences and status shortcut |
+| Settings | APN editor, cellular-carrier scan, Wi-Fi/BLE setup, light toggles and saved preferences |
+| Wi-Fi | 2.4 GHz scan, network/password entry, DHCP connection, saved credentials and forget |
+| Bluetooth LE | Keyboard discovery/HID host, authenticated phone companion service and bond controls; pairing bench tests deferred |
 | Diagnostics | USB commands, SIM/registration/signal/modem queries, keyboard tracing and log capture |
 
 LoRa uses a small [custom packet format](docs/PROTOCOL.md). It does not interoperate with Meshtastic or LoRaWAN and has no mesh routing, encryption, delivery acknowledgement, or automatic retransmission. A second compatible radio is needed to test messaging. No SMS, call, or LoRa payload is sent automatically at startup; the cellular modem is powered and attempts network registration.
 
-Touch input, contacts, Wi-Fi apps, browser, GPS, deep sleep, audio routing and a full smartphone application framework are future work. This project targets T-Deck Pro v1.0/v1.1; T-Deck Pro MAX is unsupported.
+Touch input, contacts, Internet apps, browser, GPS, deep sleep, audio routing and a full smartphone application framework are future work. This project targets T-Deck Pro v1.0/v1.1; T-Deck Pro MAX is unsupported.
 
 ## Build and flash
 
@@ -60,7 +62,10 @@ Replace the port with the actual device, such as `COM5` on Windows. PlatformIO u
 | LoRa compose | Enter sends the broadcast |
 | Phone | Enter dials the entered number; `A` answers and `H` hangs up while a call is present |
 | Diagnostics | `R` reconnects/refreshes the modem; `I` imports the SIM inbox |
-| Settings | `A` edit APN, `F` toggle screen light (v1.1), `K` toggle keyboard light, `D` status, `R` refresh modem |
+| Settings | `A` APN, `C` carrier scan, `W` Wi-Fi, `B` BLE, `F/K` lights, `D` status, `R` modem refresh |
+| Carrier scan | `R` rescan, `J/K` results pages; up to three minutes |
+| Wi-Fi | `W` radio toggle, `R` scan, `J/K` select, Enter connect, `N` hidden SSID, `F` forget |
+| BLE | `B` radio toggle, `P` phone visibility, `R` discovery, `J/K` select, Enter keyboard pairing, `C` reconnect, `F/X` forget |
 | APN editor | Enter saves and applies the APN; `Sym` cancels |
 | Message detail | Any key returns to the inbox |
 
@@ -74,6 +79,8 @@ Outbound SMS accepts printable ASCII characters available in GSM-7, up to 160 se
 
 Press `S` on Home. Light changes save automatically in NVS; the front light is available on v1.1. The APN editor accepts 1–63 letters, digits, dots or hyphens. It suggests `fast.t-mobile.com` when no APN is saved; nothing is applied until Enter is pressed. A saved APN is applied as context 1 with `IPV4V6` when the modem is ready, and restored at boot. The firmware does not start a mobile-data session. A working APN cannot add radio bands or establish carrier eligibility.
 
+See [connectivity setup](docs/CONNECTIVITY.md) for the carrier scan, Wi-Fi credentials, BLE keyboard support, phone GATT service and pairing controls. The ESP32-S3 supports Bluetooth LE; Bluetooth Classic keyboards are incompatible. Wi-Fi and BLE start disabled until explicitly enabled.
+
 ## USB console
 
 Open at 115200 baud with newline endings, using `pio device monitor --port PORT --baud 115200` or another serial terminal. Close the terminal before flashing or running the capture script.
@@ -83,6 +90,11 @@ help
 status
 diag
 settings
+carriers
+carriers results
+wifi
+wifi scan
+ble
 apn fast.t-mobile.com
 light on
 keyboard-light off

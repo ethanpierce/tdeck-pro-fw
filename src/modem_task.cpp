@@ -4,6 +4,7 @@
 #include <at_engine.h>
 #include <sms_pdu.h>
 #include <apn.h>
+#include <connectivity.h>
 #include <algorithm>
 #include <cstdlib>
 #include <memory>
@@ -366,6 +367,20 @@ private:
         },cmd=="AT+COPS=?"?180000:10000);
     }
     void handle(const CellAction& a) {
+        if(a.kind==CellActionKind::CarrierScan) {
+            if(!linked_ || configuring_ || !engine_.idle() || inCall_ || hasPendingCall_ || smsBusy_) {
+                emit(CellEventKind::CarrierDone,"Modem busy or offline; retry shortly",0);return;
+            }
+            emit(CellEventKind::CarrierStart,"Scanning carriers; up to 3 minutes");
+            send("AT+COPS=?",[](const deck::AtResult& r){
+                unsigned count=0;
+                if(r.ok)for(const auto& line:r.lines)for(const auto& n:deck::parseCarrierScan(line)) {
+                    emit(CellEventKind::Carrier,n.name,n.status,n.technology,n.code);++count;
+                }
+                emit(CellEventKind::CarrierDone,r.ok?(count?"Carrier scan complete":"No carriers returned"):"Carrier scan failed: "+r.final,r.ok);
+            },180000);
+            return;
+        }
         if(a.kind==CellActionKind::SetApn) {
             if(!deck::validApn(a.text)) {emit(CellEventKind::ApnResult,"Invalid APN",0);return;}
             apn_=a.text; apnPending_=true;

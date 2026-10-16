@@ -6,6 +6,16 @@ Settings app, light controls, saved APN and settings persistence passed bench
 checks. Read the [dated bench record](docs/BENCH_2026-10-16.md) for the observed
 results and the [flashing guide](docs/FLASHING.md) before another upload.
 
+## Connectivity update
+
+Settings now includes C for carrier scanning, W for Wi-Fi and B for Bluetooth
+LE. The physical Wi-Fi/password workflow connected successfully and obtained a
+DHCP address. BLE advertising was detected by the Mac. Keyboard and phone
+pairing tests were deferred at the user's request; Bluetooth is left off.
+Read [CONNECTIVITY.md](docs/CONNECTIVITY.md) for setup and test limits. Meshtastic
+has a supported T-Deck Pro target and the board has flash headroom, but it has
+not been integrated into Handheld OS.
+
 ## Cellular connection
 
 The A7682E responds and the SIM is ready, but normal network registration has

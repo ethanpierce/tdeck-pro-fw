@@ -3,7 +3,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <atomic>
-enum class CellEventKind : uint8_t { Link, Sim, Registration, Signal, Operator, System, Trace, SmsIn, SmsSent, Failed, Call, SmsReady, ApnResult };
+enum class CellEventKind : uint8_t { Link, Sim, Registration, Signal, Operator, System, Trace, SmsIn, SmsSent, Failed, Call, SmsReady, ApnResult, CarrierStart, Carrier, CarrierDone };
 struct CellEvent {
     CellEventKind kind;
     uint32_t id = 0;
@@ -11,7 +11,7 @@ struct CellEvent {
     char peer[32] = {};
     char text[512] = {};
 };
-enum class CellActionKind : uint8_t { Refresh, Sms, Dial, Answer, Hangup, ReadInbox, SetApn, NetworkQuery };
+enum class CellActionKind : uint8_t { Refresh, Sms, Dial, Answer, Hangup, ReadInbox, SetApn, NetworkQuery, CarrierScan };
 struct CellAction {
     CellActionKind kind;
     uint32_t id = 0;

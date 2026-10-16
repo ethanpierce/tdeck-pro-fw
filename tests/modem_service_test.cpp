@@ -148,5 +148,21 @@ int main(){
         assert(completed);
         std::cout<<"PASS 90-second network scan completes without short query timeout or reconnect\n";
     }
+    {
+        Harness h(75000);uint32_t replyAt=0;
+        h.custom=[&](const std::string& cmd,unsigned){if(cmd!="AT+COPS=?")return false;replyAt=current+60000;return true;};
+        tickHook=[&]{
+            if(current==1000)h.action(CellActionKind::CarrierScan);
+            if(replyAt && current==replyAt)Serial1.feed("+COPS: (1,\"Test LTE\",\"Test\",\"310260\",7)\r\nOK\r\n");
+        };
+        h.run();bool started=false,entry=false,done=false;
+        for(const auto& e:h.events()) {
+            if(e.kind==CellEventKind::CarrierStart)started=true;
+            if(e.kind==CellEventKind::Carrier)entry=e.value==1 && e.id==7 && std::string(e.peer)=="310260";
+            if(e.kind==CellEventKind::CarrierDone)done=e.value==1;
+        }
+        assert(started && entry && done && h.count["AT+COPS=?"]==1 && h.count["AT"]==1);
+        std::cout<<"PASS on-device carrier scan reports start, parsed result, completion without reconnect\n";
+    }
     vQueueDelete(cellEvents);vQueueDelete(cellActions);cellEvents=cellActions=nullptr;
 }

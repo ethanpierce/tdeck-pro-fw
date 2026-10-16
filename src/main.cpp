@@ -3,6 +3,9 @@
 #include <at_engine.h>
 #include <sms_pdu.h>
 #include <apn.h>
+#include <connectivity.h>
+#include "wifi_service.h"
+#include "ble_service.h"
 #include "board.h"
 #include "device_settings.h"
 #include "keyboard.h"
@@ -11,13 +14,15 @@
 #include "radio_service.h"
 #include "settings.h"
 #include <algorithm>
+#include <cstring>
 
 namespace {
 Keyboard keyboard;
 MessageStore store;
 RadioService radio;
 DeviceSettings settings;
-enum class Page { Home, Messages, SmsNumber, SmsText, Phone, Radio, RadioText, Diagnostics, Detail, Settings, Apn };
+WifiService wifi;
+enum class Page { Home, Messages, SmsNumber, SmsText, Phone, Radio, RadioText, Diagnostics, Detail, Settings, Apn, Carriers, Wifi, WifiSsid, WifiPassword, WifiForget, Ble, BlePair, BleForget };
 Page page=Page::Home;
 Page detailReturn=Page::Messages;
 bool dirty=true, cellTask=false, linked=false, simReady=false, smsConfigured=false;
@@ -28,6 +33,18 @@ String notice="Starting radios...", sim="Checking", operatorName="Unknown", syst
 String call="Idle", caller, input, recipient;
 String serialLine;
 bool serialOverflow=false;
+std::vector<deck::CarrierNetwork> carriers;
+bool carrierScanning=false,wifiNeedsPassword=false,bleTask=false,bleActive=false,bleScanning=false;
+unsigned carrierOffset=0,wifiCursor=0,bleCursor=0;
+String carrierStatus="R scans nearby carriers",wifiName,bleStatus="Off",phoneStatus="Not connected",keyboardStatus="Not connected";
+struct BleRow {String name,address;uint8_t type;int rssi;bool hid;};
+std::vector<BleRow> bleDevices;
+deck::HidKeyboardDecoder bleKeyboard;
+bool pairActive=false,forgetAllBonds=false;
+BleEventKind pairMode=BleEventKind::PairConfirm;
+uint16_t pairHandle=0;uint32_t pairPin=0,pairAt=0,bleStatusAt=0;
+void key(char c);
+
 
 const char* pageName() {
     switch(page) {
@@ -37,6 +54,10 @@ const char* pageName() {
     case Page::RadioText:return "Radio text"; case Page::Diagnostics:return "Device status";
     case Page::Detail:return "Message detail"; case Page::Settings:return "Settings";
     case Page::Apn:return "APN editor";
+    case Page::Carriers:return "Carrier scan";case Page::Wifi:return "Wi-Fi";
+    case Page::WifiSsid:return "Wi-Fi SSID";case Page::WifiPassword:return "Wi-Fi password";
+    case Page::WifiForget:return "Forget Wi-Fi";case Page::Ble:return "Bluetooth LE";
+    case Page::BlePair:return "BLE pairing";case Page::BleForget:return "Forget BLE";
     }
     return "Unknown";
 }
@@ -78,6 +99,107 @@ void printSettings() {
         value.keyboardLight?"on":"off");
 }
 void openSettings() {page=Page::Settings;input="";changed();printSettings();}
+bool saveWireless(const WirelessOptions& value) {
+    if(!settings.saveWireless(value)){inform("Wireless settings could not be saved");return false;}
+    return true;
+}
+void carrierScan() {
+    page=Page::Carriers;changed();
+    if(carrierScanning)return;
+    if(action(CellActionKind::CarrierScan)){carrierScanning=true;carrierStatus="Scan requested...";}
+}
+void openWifi(){page=Page::Wifi;input="";wifiCursor=0;changed();}
+void wifiPower(bool enabled) {
+    auto value=settings.wireless();value.wifiEnabled=enabled;
+    if(saveWireless(value))wifi.configure(value);
+    changed();
+}
+void scanWifi(){openWifi();if(!wifi.enabled)wifiPower(true);wifi.scan();}
+void connectWifi(const String& password) {
+    if((wifiNeedsPassword && password.isEmpty()) || !deck::validWifiCredentials(wifiName.c_str(),password.c_str())) {
+        inform("Use 8-63 password characters or 64 hex digits");return;
+    }
+    auto value=settings.wireless();value.wifiEnabled=1;
+    std::memset(value.ssid,0,sizeof(value.ssid));std::memset(value.password,0,sizeof(value.password));
+    snprintf(value.ssid,sizeof(value.ssid),"%s",wifiName.c_str());
+    snprintf(value.password,sizeof(value.password),"%s",password.c_str());
+    if(saveWireless(value)){input="";wifi.configure(value,true);page=Page::Wifi;changed();}
+}
+void forgetWifi() {
+    auto value=settings.wireless();value.wifiEnabled=0;std::memset(value.ssid,0,sizeof(value.ssid));std::memset(value.password,0,sizeof(value.password));
+    if(saveWireless(value)){wifi.configure(value);inform("Saved Wi-Fi network removed");}
+    openWifi();
+}
+void openBle(){page=Page::Ble;input="";changed();}
+void blePower(bool enabled) {
+    auto value=settings.wireless();value.bleEnabled=enabled;
+    if(!bleTask){inform("Bluetooth task unavailable");return;}
+    if(saveWireless(value)) {
+        if(!bleRequest(enabled?BleCommand::Enable:BleCommand::Disable))inform("Bluetooth busy; retry shortly");
+        else {bleStatus=enabled?"Starting BLE...":"Stopping BLE...";changed();}
+    }
+}
+bool bleAction(BleCommand command,const char* address="",uint8_t type=0) {
+    if(!bleActive){inform("Turn Bluetooth on first");return false;}
+    if(!bleRequest(command,address,type)){inform("Bluetooth busy; retry shortly");return false;}
+    return true;
+}
+void connectBleSelection() {
+    if(bleScanning){inform("Wait for the BLE scan to finish");return;}
+    if(bleCursor<bleDevices.size())bleAction(BleCommand::Connect,bleDevices[bleCursor].address.c_str(),bleDevices[bleCursor].type);
+}
+void cancelPair(){if(pairActive)bleRequest(BleCommand::CancelPair,"",0,0,pairHandle);pairActive=false;input="";}
+void forgetBle() {
+    const auto old=settings.wireless();auto value=old;std::memset(value.keyboardAddress,0,sizeof(value.keyboardAddress));
+    if(saveWireless(value))bleAction(forgetAllBonds?BleCommand::ForgetAll:BleCommand::ForgetKeyboard,old.keyboardAddress,old.keyboardAddressType);
+    openBle();
+}
+void blePoll() {
+    if(!bleTask)return;
+    BleEvent e{};
+    while(xQueueReceive(bleEvents,&e,0)==pdTRUE) {
+        switch(e.kind) {
+        case BleEventKind::State:
+            bleActive=e.value;bleStatus=e.text;
+            if(!bleActive){bleDevices.clear();bleScanning=false;keyboardStatus=phoneStatus="Not connected";cancelPair();}
+            inform(e.text);break;
+        case BleEventKind::Notice:inform(e.text);break;
+        case BleEventKind::ScanStart:bleDevices.clear();bleCursor=0;bleScanning=true;inform(e.text);break;
+        case BleEventKind::ScanDone:
+            bleScanning=false;bleCursor=0;
+            std::sort(bleDevices.begin(),bleDevices.end(),[](const BleRow& a,const BleRow& b){return a.hid!=b.hid?a.hid>b.hid:a.rssi>b.rssi;});
+            inform(e.text);break;
+        case BleEventKind::Advertising:phoneStatus=e.text;changed();break;
+        case BleEventKind::Phone:phoneStatus=e.text;changed();break;
+        case BleEventKind::Keyboard:keyboardStatus=e.text;inform(e.text);break;
+        case BleEventKind::RememberKeyboard: {
+            auto value=settings.wireless();snprintf(value.keyboardAddress,sizeof(value.keyboardAddress),"%s",e.address);value.keyboardAddressType=e.addressType&1;
+            if(!saveWireless(value))inform("Keyboard works; address could not be saved");break;
+        }
+        case BleEventKind::Device: {
+            auto found=std::find_if(bleDevices.begin(),bleDevices.end(),[&](const BleRow& row){return row.address==e.address && row.type==e.addressType;});
+            BleRow row{e.text[0]?String(e.text):String("Unnamed BLE device"),String(e.address),e.addressType,int(int16_t(e.handle)),bool(e.value)};
+            if(found!=bleDevices.end())*found=row;else if(bleDevices.size()<24)bleDevices.push_back(row);
+            else if(row.hid){auto other=std::find_if(bleDevices.begin(),bleDevices.end(),[](const BleRow& r){return !r.hid;});if(other!=bleDevices.end())*other=row;}
+            // Keep insertion order stable while selecting a device.
+            changed();break;
+        }
+        case BleEventKind::Layout:bleKeyboard.configure({e.bytes[0],e.bytes[1],e.bytes[2],e.bytes[3],e.bytes[4],e.bytes[5]});break;
+        case BleEventKind::Hid:for(char c:bleKeyboard.feed(e.bytes,e.length))key(c);break;
+        case BleEventKind::PairConfirm:case BleEventKind::PairEntry:case BleEventKind::PairDisplay:
+            if(pairActive && pairHandle!=e.handle){bleRequest(BleCommand::CancelPair,"",0,0,e.handle);break;}
+            pairActive=true;pairMode=e.kind;pairHandle=e.handle;pairPin=e.value;pairAt=millis();input="";page=Page::BlePair;changed();break;
+        case BleEventKind::PairDone:
+            if(pairActive && pairHandle==e.handle){pairActive=false;input="";if(page==Page::BlePair)page=Page::Ble;}
+            inform(e.text);break;
+        }
+    }
+    if(pairActive && uint32_t(millis()-pairAt)>60000){cancelPair();page=Page::Ble;inform("Bluetooth pairing timed out");}
+    if(bleActive && uint32_t(millis()-bleStatusAt)>=5000) {
+        char status[160];snprintf(status,sizeof(status),"Handheld OS 0.1\nBattery: %d%%\nLTE: %s\nWi-Fi: %s\nLoRa: %s\n",battery,networkName(),wifi.status.c_str(),radio.ready?"ready":"unavailable");
+        bleRequest(BleCommand::Status,"",0,0,0,status,battery<0?0:battery);bleStatusAt=millis();
+    }
+}
 void saveApn(const String& value) {
     if(!deck::validApn(value.c_str())) {inform("Use an APN of 1-63 letters, digits, dots or hyphens");return;}
     auto options=settings.values();
@@ -127,6 +249,9 @@ void cellPoll() {
         case CellEventKind::System:systemInfo=e.text; changed(); break;
         case CellEventKind::Trace:Serial.println(e.text); break;
         case CellEventKind::ApnResult:inform(e.text); break;
+        case CellEventKind::CarrierStart:carriers.clear();carrierOffset=0;carrierScanning=true;carrierStatus=e.text;changed();break;
+        case CellEventKind::Carrier:if(carriers.size()<16)carriers.push_back({e.value,int(e.id),e.text,e.peer});changed();break;
+        case CellEventKind::CarrierDone:carrierScanning=false;carrierStatus=e.text;inform(e.text);break;
         case CellEventKind::SmsIn:
             if(store.add(Medium::Sms,true,e.peer,e.text,e.id)) inform(String("SMS from ")+e.peer);
             break;
@@ -156,11 +281,15 @@ void printStatus() {
     Serial.printf("Message storage: %s | Dropped cellular events: %lu\n",store.persistent?"NVS":"RAM only",(unsigned long)droppedCellEvents.load());
     Serial.println("US T-Mobile: A7682E lacks B2/B4/B12/B66/B71; B5 alone is not broad compatibility.");
     printSettings();
+    Serial.printf("Wi-Fi: %s | IP: %s | Saved network: %s\n",wifi.status.c_str(),wifi.address.c_str(),settings.wireless().ssid[0]?"yes":"no");
+    Serial.printf("BLE: %s | Phone: %s | Keyboard: %s | Dropped BLE events: %lu\n",bleStatus.c_str(),phoneStatus.c_str(),keyboardStatus.c_str(),(unsigned long)droppedBleEvents.load());
+    Serial.printf("Heap: %u free / %u minimum | PSRAM: %u free\n",ESP.getFreeHeap(),ESP.getMinFreeHeap(),ESP.getFreePsram());
 }
 void help() {
     Serial.println("Handheld OS 0.1 | Commands (USB 115200, newline):");
     Serial.println("help | status | diag | settings | inbox | scan-sim | home | keys on | keys off");
     Serial.println("apn <name> | light on/off | keyboard-light on/off | modem <read-only AT query>");
+    Serial.println("carriers | wifi | wifi on/off/scan/forget | ble | ble on/off/scan/pair/reconnect | ble connect <1..24>");
     Serial.println("sms +15551234567|Hello | dial +15551234567 | answer | hangup | lora Hello");
     Serial.println("No messages/calls are sent at boot. LoRa is plaintext; no delivery acknowledgements.");
 }
@@ -170,6 +299,28 @@ void command(String line) {
     else if(line=="status") printStatus();
     else if(line=="home") home();
     else if(line=="settings") openSettings();
+    else if(line=="carriers")carrierScan();
+    else if(line=="carriers results") {
+        page=Page::Carriers;changed();
+        Serial.printf("Carrier scan: %s | %u results\n",carrierStatus.c_str(),unsigned(carriers.size()));
+        for(const auto& row:carriers)Serial.printf("Carrier: %s | %s | state %d | RAT %d\n",row.name.c_str(),row.code.c_str(),row.status,row.technology);
+    }
+    else if(line=="wifi")openWifi();
+    else if(line=="wifi scan")scanWifi();
+    else if(line=="wifi networks") {
+        for(unsigned i=0;i<wifi.networks.size();++i)Serial.printf("Wi-Fi %u: %s | %d dBm | %s\n",i+1,wifi.networks[i].ssid.c_str(),wifi.networks[i].rssi,wifi.networks[i].auth==WIFI_AUTH_OPEN?"open":"secured");
+    }
+    else if(line=="wifi on" || line=="wifi off")wifiPower(line=="wifi on");
+    else if(line=="wifi forget")forgetWifi();
+    else if(line=="ble")openBle();
+    else if(line=="ble on" || line=="ble off")blePower(line=="ble on");
+    else if(line=="ble scan"){openBle();bleAction(BleCommand::Scan);}
+    else if(line=="ble devices") {
+        for(unsigned i=0;i<bleDevices.size();++i)Serial.printf("BLE %u: %s | %d dBm | %s | %s\n",i+1,bleDevices[i].name.c_str(),bleDevices[i].rssi,bleDevices[i].hid?"HID candidate":"BLE device",bleDevices[i].address.c_str());
+    }
+    else if(line=="ble pair"){openBle();bleAction(BleCommand::Advertise);}
+    else if(line=="ble reconnect"){const auto& v=settings.wireless();bleAction(BleCommand::Connect,v.keyboardAddress,v.keyboardAddressType);}
+    else if(line.startsWith("ble connect ")){unsigned n=line.substring(12).toInt();if(n && n<=bleDevices.size()){bleCursor=n-1;connectBleSelection();}else inform("Choose a BLE scan result (1-24)");}
     else if(line.startsWith("apn ")) saveApn(line.substring(4));
     else if(line=="light on" || line=="light off") saveLights(line=="light on",settings.values().keyboardLight);
     else if(line=="keyboard-light on" || line=="keyboard-light off") saveLights(settings.values().frontLight,line=="keyboard-light on");
@@ -210,7 +361,7 @@ std::vector<const Message*> visibleMessages(Medium medium) {
 }
 void key(char c) {
     if(!c) return;
-    if(c==27){home();return;}
+    if(c==27){cancelPair();home();return;}
     if(page==Page::Home) {
         if(c=='m') page=Page::Messages;
         if(c=='p') page=Page::Phone;
@@ -226,8 +377,67 @@ void key(char c) {
             if(board::revision11) saveLights(!value.frontLight,value.keyboardLight);
             else inform("Screen light is not fitted on this revision");
         } else if(c=='k') saveLights(value.frontLight,!value.keyboardLight);
+        else if(c=='c')carrierScan();
+        else if(c=='w')openWifi();
+        else if(c=='b')openBle();
         else if(c=='d') {page=Page::Diagnostics;changed();}
         else if(c=='r') {action(CellActionKind::Refresh);inform("Refreshing modem status");}
+        return;
+    }
+    if(page==Page::Carriers) {
+        if(c=='r')carrierScan();
+        if(c=='j' && carrierOffset+4<carriers.size()){carrierOffset+=4;changed();}
+        if(c=='k' && carrierOffset>=4){carrierOffset-=4;changed();}
+        return;
+    }
+    if(page==Page::Wifi) {
+        if(c=='w')wifiPower(!settings.wireless().wifiEnabled);
+        else if(c=='r')scanWifi();
+        else if(c=='n'){input="";page=Page::WifiSsid;changed();}
+        else if(c=='f'){page=Page::WifiForget;changed();}
+        else if(c=='j' && wifiCursor+1<wifi.networks.size()){++wifiCursor;changed();}
+        else if(c=='k' && wifiCursor){--wifiCursor;changed();}
+        else if((c=='\r' || c=='\n') && wifiCursor<wifi.networks.size()) {
+            const auto& row=wifi.networks[wifiCursor];
+            if(!WifiService::supported(row.auth)){inform("This Wi-Fi security type is unsupported");return;}
+            wifiName=row.ssid;wifiNeedsPassword=row.auth!=WIFI_AUTH_OPEN;
+            if(!wifiNeedsPassword)connectWifi("");
+            else {input=wifiName==settings.wireless().ssid?String(settings.wireless().password):String("");page=Page::WifiPassword;changed();}
+        }
+        return;
+    }
+    if(page==Page::WifiSsid || page==Page::WifiPassword) {
+        if(c=='\b'){if(input.length())input.remove(input.length()-1);changed();}
+        else if(c=='\r' || c=='\n') {
+            if(page==Page::WifiSsid) {if(input.isEmpty())return;wifiName=input;input="";wifiNeedsPassword=false;page=Page::WifiPassword;changed();}
+            else connectWifi(input);
+        } else if(c>=32 && c<=126 && input.length()<(page==Page::WifiSsid?32:64)){input+=c;changed();}
+        return;
+    }
+    if(page==Page::WifiForget){if(c=='y')forgetWifi();else if(c=='n')openWifi();return;}
+    if(page==Page::Ble) {
+        if(c=='b')blePower(!settings.wireless().bleEnabled);
+        else if(c=='p')bleAction(BleCommand::Advertise);
+        else if(c=='r')bleAction(BleCommand::Scan);
+        else if(c=='c'){const auto& v=settings.wireless();bleAction(BleCommand::Connect,v.keyboardAddress,v.keyboardAddressType);}
+        else if(c=='f' || c=='x'){forgetAllBonds=c=='x';page=Page::BleForget;changed();}
+        else if(c=='j' && bleCursor+1<bleDevices.size()){++bleCursor;changed();}
+        else if(c=='k' && bleCursor){--bleCursor;changed();}
+        else if(c=='\r' || c=='\n')connectBleSelection();
+        return;
+    }
+    if(page==Page::BleForget){if(c=='y')forgetBle();else if(c=='n')openBle();return;}
+    if(page==Page::BlePair) {
+        if(pairMode==BleEventKind::PairConfirm && (c=='y' || c=='n')) {
+            bleRequest(BleCommand::Confirm,"",0,c=='y',pairHandle);if(c=='n'){pairActive=false;openBle();}else inform("Pairing confirmation sent");
+        } else if(pairMode==BleEventKind::PairEntry) {
+            if(c=='\b'){if(input.length())input.remove(input.length()-1);changed();}
+            else if((c=='\r' || c=='\n') && input.length()==6){bleRequest(BleCommand::Passkey,"",0,input.toInt(),pairHandle);input="";inform("Passkey sent");}
+            else {
+                const char* digits="wersdfzxcp";const char* mapped=strchr(digits,c);if(mapped)c=mapped-digits==9?'0':char('1'+mapped-digits);
+                if(c>='0' && c<='9' && input.length()<6){input+=c;changed();}
+            }
+        }
         return;
     }
     if(page==Page::Apn) {
@@ -381,15 +591,15 @@ void draw() {
         } else if(page==Page::Settings) {
             const auto& value=settings.values();
             text(10,44,"SETTINGS",2);
-            text(10,77,"A  Mobile data APN");
-            wrap(value.apn[0]?String(value.apn):String("Use modem's current profile"),28,94,32,2);
-            s.drawFastHLine(10,119,220,GxEPD_BLACK);
-            text(10,135,String("F  Screen light: ")+(board::revision11?(value.frontLight?"On":"Off"):"Not fitted"));
-            text(10,159,String("K  Keyboard light: ")+(value.keyboardLight?"On":"Off"));
-            s.drawFastHLine(10,181,220,GxEPD_BLACK);
-            text(10,197,"D  Device status");
-            text(10,219,"R  Refresh cellular modem");
-            text(10,250,settings.persistent?"Changes save automatically":"Settings storage unavailable");
+            text(10,75,"A  APN: "+clipped(value.apn[0]?String(value.apn):String("Use modem profile"),25));
+            text(10,99,"C  Scan cellular carriers");
+            text(10,123,"W  Wi-Fi setup");
+            text(10,147,"B  Bluetooth LE setup");
+            s.drawFastHLine(10,166,220,GxEPD_BLACK);
+            text(10,179,String("F  Screen light: ")+(board::revision11?(value.frontLight?"On":"Off"):"Not fitted"));
+            text(10,201,String("K  Keyboard light: ")+(value.keyboardLight?"On":"Off"));
+            text(10,227,"D  Device status");text(10,246,"R  Refresh cellular modem");
+            text(10,261,settings.persistent?"Settings saved on device":"Settings storage unavailable");
         } else if(page==Page::Apn) {
             text(10,44,"MOBILE DATA APN",2);
             wrap(input+"_",10,84,35,3);
@@ -397,6 +607,62 @@ void draw() {
             text(10,151,"Sym: cancel and return home");
             wrap("Changing the APN does not add support for missing radio bands.",10,189,35,3);
             text(10,244,"T-Mobile: fast.t-mobile.com");
+        } else if(page==Page::Carriers) {
+            text(10,44,"CARRIER SCAN",2);wrap(carrierStatus,10,73,35,2);
+            for(unsigned n=0;n<4 && carrierOffset+n<carriers.size();++n) {
+                const auto& row=carriers[carrierOffset+n];int y=105+n*31;
+                text(10,y,clipped(row.code=="313100"?String("FirstNet"):String(row.name.c_str()),34));
+                const char* state=row.status==1?"Available":row.status==2?"Current":row.status==3?"Forbidden":"Unknown";
+                text(10,y+12,String(row.code.c_str())+"  "+(row.technology==7?String("LTE"):String("RAT ")+row.technology)+"  "+state);
+            }
+            text(10,239,"R Scan again   J/K Page");text(10,255,"Scan does not switch carriers");
+        } else if(page==Page::Wifi) {
+            text(10,44,"WI-FI / 2.4 GHz",2);text(10,73,clipped(wifi.status,35));text(10,87,wifi.address.length()?"IP "+wifi.address:String("No IP address"));
+            text(10,105,"W On/Off  R Scan  N Hidden SSID");
+            unsigned offset=(wifiCursor/4)*4;
+            if(wifi.networks.empty())text(10,140,wifi.enabled?"No scan results yet. R scans.":"Wi-Fi is off. W turns it on.");
+            for(unsigned n=0;n<4 && offset+n<wifi.networks.size();++n) {
+                const auto& row=wifi.networks[offset+n];int y=128+n*24;
+                text(10,y,String(offset+n==wifiCursor?"> ":"  ")+clipped(row.ssid,31));
+                text(22,y+11,String(row.rssi)+" dBm / "+(row.auth==WIFI_AUTH_OPEN?"Open":WifiService::supported(row.auth)?"Password":"Unsupported security"));
+            }
+            text(10,232,"J/K Select   Enter Connect");text(10,250,"F Forget saved Wi-Fi network");
+        } else if(page==Page::WifiSsid || page==Page::WifiPassword) {
+            bool secret=page==Page::WifiPassword;
+            text(10,44,secret?"WI-FI PASSWORD":"WI-FI NAME",2);
+            if(secret)wrap(wifiName,10,78,35,2);
+            String visible=input;
+            if(secret){visible="";for(unsigned i=0;i<input.length();++i)visible+='*';}
+            wrap(visible+"_",10,110,35,3);
+            text(10,164,secret?"Enter: save and connect":"Enter: continue");text(10,184,"Sym: cancel and return home");
+            if(secret){text(10,216,"Blank password: open Wi-Fi only");text(10,236,"Password stays on this device");}
+        } else if(page==Page::WifiForget || page==Page::BleForget) {
+            text(10,44,"FORGET CONNECTION",2);
+            wrap(page==Page::WifiForget?String("Remove saved Wi-Fi name and password?"):String(forgetAllBonds?"Remove all BLE bonds and the saved keyboard?":"Remove the saved BLE keyboard and its bond?"),10,90,35,5);
+            text(10,176,"Y Confirm     N Cancel");
+        } else if(page==Page::Ble) {
+            text(10,44,"BLUETOOTH LE",2);text(10,73,clipped(bleStatus,35));text(10,87,clipped(phoneStatus,35));text(10,101,clipped(keyboardStatus,35));
+            text(10,119,"B On/Off  P Phone  R Scan");text(10,132,"C Reconnect saved keyboard");
+            unsigned offset=(bleCursor/3)*3;
+            if(bleDevices.empty())text(10,162,bleScanning?"Scanning BLE devices...":"Put keyboard in pairing mode");
+            for(unsigned n=0;n<3 && offset+n<bleDevices.size();++n) {
+                const auto& row=bleDevices[offset+n];int y=151+n*25;
+                text(10,y,String(offset+n==bleCursor?"> ":"  ")+clipped(row.name,31));
+                text(22,y+11,String(row.rssi)+" dBm "+(row.hid?"HID / keyboard candidate":"BLE device"));
+            }
+            text(10,232,"J/K Select   Enter Pair keyboard");text(10,249,"F Forget keyboard  X Clear bonds");
+        } else if(page==Page::BlePair) {
+            text(10,44,"BLUETOOTH PAIR",2);
+            if(pairMode==BleEventKind::PairConfirm) {
+                text(10,83,"Compare this code on both devices");
+                char pin[8];snprintf(pin,sizeof(pin),"%06lu",(unsigned long)pairPin);text(10,117,pin,3);
+                text(10,169,"Y Codes match   N Reject");
+            } else if(pairMode==BleEventKind::PairDisplay) {
+                text(10,83,"Type this code on the other device");
+                char pin[8];snprintf(pin,sizeof(pin),"%06lu",(unsigned long)pairPin);text(10,117,pin,3);
+                text(10,169,"Then press Enter on that device");
+            } else {text(10,83,"Enter the other device's 6-digit code");text(10,117,input+"_",3);text(10,169,"Enter: submit passkey");text(10,190,"W/E/R 1/2/3 | S/D/F 4/5/6");text(10,205,"Z/X/C 7/8/9 | P 0");}
+            text(10,241,"Sym cancels. Expires in 60 seconds.");
         } else if(page==Page::Detail) {
             for(const auto& m:store.messages()) if(m.sequence==detailId) {
                 text(10,44,m.medium==Medium::Sms?"SMS":"LORA",2);
@@ -422,6 +688,13 @@ void setup() {
     settings.begin();
     board::lights(settings.values().frontLight,settings.values().keyboardLight);
     battery=board::batteryPercent();
+    wifi.changed=[](const String& value){inform("Wi-Fi: "+value);};
+    wifi.configure(settings.wireless());
+    bleTask=startBleTask();
+    if(bleTask && settings.wireless().bleEnabled) {
+        bleRequest(BleCommand::Enable);
+        if(settings.wireless().keyboardAddress[0])bleRequest(BleCommand::Connect,settings.wireless().keyboardAddress,settings.wireless().keyboardAddressType);
+    }
     radio.received=[](const deck::RadioPacket& p,int rssi){
         char peer[20]; snprintf(peer,sizeof(peer),"Node %08lX",(unsigned long)p.sender);
         std::string identity=std::to_string(p.sender)+":"+std::to_string(p.sequence);
@@ -441,7 +714,7 @@ void setup() {
 }
 void loop() {
     if(board::unsupported) {delay(100);return;}
-    serialPoll(); cellPoll();
+    serialPoll(); cellPoll(); wifi.poll(); blePoll();
     bool radioWasReady=radio.ready;
     radio.poll();
     if(radio.ready!=radioWasReady) inform(radio.ready?"LoRa receiver restored":"LoRa receive unavailable; retrying");

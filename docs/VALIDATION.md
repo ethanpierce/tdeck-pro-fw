@@ -18,7 +18,7 @@ pio run -e tdeck-pro
 python -m py_compile tools/bench.py tools/package.py
 ```
 
-The test runner builds and executes four host binaries with `-Wall -Wextra -Werror`, AddressSanitizer and UndefinedBehaviorSanitizer. LeakSanitizer is disabled by default because it cannot attach under some sandbox policies; address/undefined-behavior checking remains enabled.
+The test runner builds and executes five host binaries with `-Wall -Wextra -Werror`, AddressSanitizer and UndefinedBehaviorSanitizer. LeakSanitizer is disabled by default because it cannot attach under some sandbox policies; address/undefined-behavior checking remains enabled.
 
 ## Additional local checks — 2026-10-16
 
@@ -28,6 +28,12 @@ scan without reconnect. A fourth host binary tests APN validation, settings NVS
 restart persistence, namespace isolation, failed-write rollback and corrupted or
 truncated record recovery. Physical Settings/APN/light checks and their limits
 are recorded in the bench report above.
+
+The connectivity pass adds a tenth modem scenario for on-device carrier scan
+start/result/completion events, a fifth host binary for carrier parsing, Wi-Fi
+limits, BLE addresses and HID key-array/NKRO decoding (including 6,000 malformed
+inputs), and wireless-settings persistence/old-record preservation tests. See
+[connectivity setup](CONNECTIVITY.md) and the later section of the bench report.
 
 ## Checks exercised during preparation
 

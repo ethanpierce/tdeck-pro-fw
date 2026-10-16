@@ -39,6 +39,21 @@ int main() {
     DeviceSettings afterFailedWrite;
     afterFailedWrite.begin();
     assert(afterFailedWrite.values().keyboardLight);
+    auto wireless=afterFailedWrite.wireless();
+    assert(!wireless.wifiEnabled && !wireless.bleEnabled);
+    wireless.wifiEnabled=wireless.bleEnabled=1;
+    std::strcpy(wireless.ssid,"Test network");std::strcpy(wireless.password,"test-only-password");
+    std::strcpy(wireless.keyboardAddress,"12:34:56:78:9a:bc");wireless.keyboardAddressType=1;
+    assert(afterFailedWrite.saveWireless(wireless));
+    DeviceSettings wirelessRestart;wirelessRestart.begin();
+    assert(wirelessRestart.wireless().bleEnabled && std::string(wirelessRestart.wireless().ssid)=="Test network");
+    assert(std::string(wirelessRestart.values().apn)=="fast.t-mobile.com");
+    assert(wirelessRestart.values().keyboardLight); // New settings preserve the old layout and values.
+    fakeNvs::failWrites=true;wireless.wifiEnabled=0;
+    assert(!wirelessRestart.saveWireless(wireless) && wirelessRestart.wireless().wifiEnabled);
+    fakeNvs::failWrites=false;
+    fakeNvs::blobs["decksettings/wireless"][12]^=1;
+    DeviceSettings badWireless;badWireless.begin();assert(!badWireless.wireless().ssid[0] && badWireless.values().keyboardLight);
     fakeNvs::blobs["decksettings/options"][8]^=1;
     DeviceSettings corrupt;
     corrupt.begin();

@@ -31,6 +31,7 @@ TCA8418 keys ├── main loop / e-paper UI ─── NVS message ring
 - `sms_pdu.*`: number validation, single-part GSM-7 SMS submission encoding, supported SMS-DELIVER decoding and parsing helpers.
 - `radio_packet.*`: strict validation of the compact plaintext Handheld OS broadcast format.
 - `keyboard_decoder.*`: physical TCA8418 event decoding, modifiers and special keys.
+- `connectivity.*`: bounded carrier-scan parsing, Wi-Fi credential validation, BLE address validation, HID report-map parsing and keyboard report decoding.
 
 `tools/test.sh` compiles these with warnings as errors and address/undefined-behavior sanitizers. `tests/core_test.cpp` provides regression fixtures. A second suite compiles the actual `src/message_store.cpp` against a host fake of Preferences to exercise retention, corrupted records, reset handling and write failures. A third runs the actual cellular-service loop against a fake UART, FreeRTOS queues and deterministic clock to check boot/SIM recovery, SMS uncertainty, call scheduling and inbox streaming. These tests validate parsing and state behavior; they cannot establish hardware pin timing, radio link quality, carrier support or voice audio.
 
@@ -64,6 +65,26 @@ cellular task writes UART1: it applies a saved APN to context 1 as `IPV4V6` when
 idle/ready, first checking whether the modem already has the desired profile.
 No packet-data session is started. A bounded allowlist permits explicit read-only
 network diagnostics; operator scanning has a three-minute command timeout.
+
+## Wi-Fi and Bluetooth
+
+`src/wifi_service.cpp` runs asynchronous scans and polls station connection state
+on the main loop. `WiFi.persistent(false)` avoids a second framework credential
+store; a separate versioned/checksummed `wireless` record in `decksettings` holds
+the selected network, credentials, enable switches and keyboard identity address.
+The original APN/light record is preserved across the upgrade. Passwords are
+masked and excluded from serial/BLE status output.
+
+`src/ble_service.cpp` owns NimBLE lifecycle, central connections, GATT discovery
+and phone services on a worker task. BLE host callbacks emit bounded queue events;
+UI mutation and HID keystroke decoding occur only on the main task. Pairing
+prompts reach the display and require physical confirmation or passkey input;
+there is no automatic numeric-comparison approval. Phone status reads/writes
+require authenticated encryption. Phone visibility is explicitly requested and
+expires after two minutes. Keyboard report maps and input values are bounded;
+unsupported reports are rejected. BLE bond keys are managed by NimBLE in NVS.
+Actual keyboard/phone pairing was deferred by the user after passive BLE
+advertising was checked.
 
 ## Configuration and extension points
 
