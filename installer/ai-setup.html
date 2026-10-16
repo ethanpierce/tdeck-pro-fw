@@ -40,7 +40,14 @@
           <input id="endpoint" name="endpoint" type="url" value="https://api.openai.com/v1" maxlength="191" required autocomplete="off" autocapitalize="none" spellcheck="false" aria-describedby="endpoint-note">
           <p id="endpoint-note" class="small">Keep this for OpenAI, or enter your own OpenAI-compatible provider's HTTPS API base.</p>
           <label for="model">Model</label>
-          <input id="model" name="model" type="text" value="gpt-5.6-luna" maxlength="95" required autocomplete="off" autocapitalize="none" spellcheck="false">
+          <input id="model" name="model" type="text" value="gpt-5.6-luna" list="openai-models" maxlength="95" required autocomplete="off" autocapitalize="none" spellcheck="false">
+          <datalist id="openai-models">
+            <option value="gpt-5.6-luna">GPT-5.6 Luna</option>
+            <option value="gpt-5.6-terra">GPT-5.6 Terra</option>
+            <option value="gpt-5.6-sol">GPT-5.6 Sol</option>
+            <option value="gpt-5.4-mini">GPT-5.4 Mini</option>
+          </datalist>
+          <p class="small">Choose a preset or type a custom model ID. Available models depend on your API account.</p>
           <label for="api-key">API key</label>
           <input id="api-key" name="api-key" type="password" maxlength="255" required autocomplete="off" autocapitalize="none" spellcheck="false" aria-describedby="key-note">
           <p id="key-note" class="small">Use your provider's API key. An API account may have separate usage charges. This form replaces the saved key.</p>
@@ -53,8 +60,8 @@
 
     <section aria-labelledby="next-title">
       <h2 id="next-title">Then use the device</h2>
-      <p>After saving, press <kbd>A</kbd> on the device's AI setup screen, then <kbd>N</kbd> to write a question. <kbd>Enter</kbd> sends it to your selected provider. Connect Wi-Fi first in Settings → <kbd>W</kbd>.</p>
-      <p><kbd>J</kbd>/<kbd>K</kbd> pages through replies. <kbd>Sym</kbd> returns Home, where <kbd>A</kbd> opens AI chat again.</p>
+      <p>After saving, press <kbd>A</kbd> on the device's AI setup screen, type your question into the conversation, and press <kbd>Enter</kbd> or tap Send. Wi-Fi is preferred when connected; otherwise chat uses the LTE modem with a working SIM, APN and data service.</p>
+      <p>Tap Older/Newer to read the thread, or hold Shift + Alt and press K/J. <kbd>Sym</kbd> goes back. Home → <kbd>M</kbd> opens all conversations; Home → <kbd>A</kbd> opens AI chat.</p>
       <p class="small">Setup does not test the key or make an API request. If your provider rejects it, check your account's API access and exact model name. <a href="https://github.com/ethanpierce/tdeck-pro-fw/blob/main/docs/AI_CHAT.md">More AI setup help</a>.</p>
     </section>
     <footer><a href="./">Back to firmware installer</a> · An independent hobby project · GPL-3.0-only</footer>

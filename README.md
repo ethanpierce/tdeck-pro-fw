@@ -1,6 +1,6 @@
 # Handheld OS
 
-A keyboard-first firmware foundation for the **LILYGO T-Deck Pro with an A7682E modem and 915 MHz SX1262 radio**. It runs on the ESP32-S3 using Arduino/FreeRTOS, with an e-paper home screen, SMS, AI chat over Wi-Fi, call controls, LoRa chat, and USB diagnostics.
+A keyboard-first firmware foundation for the **LILYGO T-Deck Pro with an A7682E modem and 915 MHz SX1262 radio**. It runs on the ESP32-S3 using Arduino/FreeRTOS, with e-paper conversations for SMS, AI and nearby LoRa broadcasts, optional touch controls, call controls and USB diagnostics.
 
 **[Install in your browser](https://ethanpierce.github.io/tdeck-pro-fw/)** — no build tools required.
 [macOS instructions](docs/INSTALL_MACOS.md) · [Windows instructions](docs/INSTALL_WINDOWS.md) · [Firmware downloads](https://github.com/ethanpierce/tdeck-pro-fw/releases)
@@ -16,9 +16,11 @@ This is a starter for hardware bring-up, with a firmware build and host-side pro
 | Feature | Starter behavior |
 | --- | --- |
 | Home screen | E-paper launcher, battery reading, registration and radio status |
-| Status bar | Cellular technology, four signal bars and battery percentage on every screen |
-| SMS | Compose/send a single GSM-7 message; import supported messages from SIM storage |
-| AI Chat | Configurable HTTPS OpenAI-compatible endpoint/model/key; defaults to OpenAI GPT-5.6 Luna; Wi-Fi required |
+| Status bar | Wi-Fi state with three bars, cellular technology with four bars, and battery percentage |
+| Conversations | One SMS thread per numeric peer, one AI thread, and one shared Nearby LoRa broadcast thread; inline composer |
+| SMS | Compose/send a single GSM-7 message; prefer modem memory for reception, with SIM fallback; import supported messages from both stores |
+| AI Chat | HTTPS over connected Wi-Fi or otherwise LTE; four model presets plus Custom; replies limited to 500 characters; LTE hardware validation pending |
+| Touch | Cards, conversation rows, Send/history controls and model selection when a supported CST328/CST3530 240×320 controller is detected; hardware validation pending |
 | Phone | Dial, answer, hang up, incoming-call indication, modem call-state polling |
 | LoRa | Direct plaintext broadcasts between compatible Handheld OS peers at 915 MHz |
 | History | Last 16 combined SMS/LoRa messages in NVS, with integrity checks and duplicate filtering |
@@ -29,7 +31,7 @@ This is a starter for hardware bring-up, with a firmware build and host-side pro
 
 LoRa uses a small [custom packet format](docs/PROTOCOL.md). It does not interoperate with Meshtastic or LoRaWAN and has no mesh routing, encryption, delivery acknowledgement, or automatic retransmission. A second compatible radio is needed to test messaging. No SMS, call, or LoRa payload is sent automatically at startup; the cellular modem is powered and attempts network registration.
 
-Touch input, contacts, Internet apps, browser, GPS, deep sleep, audio routing and a full smartphone application framework are future work. This project targets T-Deck Pro v1.0/v1.1; T-Deck Pro MAX is unsupported.
+Contacts, a browser, GPS, deep sleep, audio routing and a full smartphone application framework are future work. This project targets T-Deck Pro v1.0/v1.1; T-Deck Pro MAX is unsupported.
 
 ## Build and flash
 
@@ -55,38 +57,44 @@ python tools/bench.py --port /dev/ttyACM0 --seconds 60
 
 Replace the port with the actual device, such as `COM5` on Windows. PlatformIO uploads the bootloader, partition table and app at the correct addresses. A standalone `firmware.bin` is only the app, not a complete first-flash image.
 
-## Keyboard
+## Messages and controls
+
+Press **M** from Home for the conversation list. Choose **New message**, **AI Assistant**, **Nearby LoRa**, or a phone-number thread with J/K and Enter, or tap its row when touch is available. New message asks for a phone number; Enter or Continue opens its thread without sending. SMS threads group the same numeric peer with or without a leading `+`, retaining the original reply address. There is no contact address book or unread count yet. Nearby LoRa is one shared broadcast group, not private radio messaging.
+
+Inside a thread, **type immediately** into the composer and press **Enter** or tap **Send** to send. Ordinary N/J/K/C letters are message text. Use **Older/Newer** or **Shift + Alt + K/J** to scroll history. **Sym** or the top-left **<** goes back to the list or Home, according to where the thread was opened. E-paper refresh is slow; touches against a stale screen are ignored until redraw completes.
 
 | Screen | Keys |
 | --- | --- |
 | Home | `M` Messages, `P` Phone, `L` LoRa, `D` diagnostics, `A` AI Chat, `S` Settings; use lowercase/unshifted keys |
-| Any screen | `Sym` returns home and cancels the current draft |
-| Messages / LoRa | `N` compose, `J` next page, `K` previous page; hold `Alt` and press printed `1`–`4` to open a message |
+| Navigation | `Sym` goes back; leaving a thread cancels its draft, while an already submitted request continues |
+| Conversation list | `J/K` select a row; Enter opens it; touch selects the displayed row |
+| SMS / AI / Nearby LoRa thread | Type into the composer; Enter or Send submits; Shift + Alt + K/J scrolls older/newer history |
 | Number entry | `W/E/R` → `1/2/3`, `S/D/F` → `4/5/6`, `Z/X/C` → `7/8/9`, `P` → `0`, `O` → `+`; no Alt needed |
-| SMS compose | Enter after the number opens the text field; Enter in the text field sends |
-| LoRa compose | Enter sends the broadcast |
+| New SMS | Enter or Continue after the number opens its thread; nothing is sent until the message is submitted |
+| AI model picker | Settings I → M; J/K and Enter, or tap one of four presets / Custom |
 | Phone | Enter dials the entered number; `A` answers and `H` hangs up while a call is present |
-| Diagnostics | `R` reconnects/refreshes the modem; `I` imports the SIM inbox |
+| Diagnostics | `R` reconnects/refreshes the modem; `I` imports both SMS stores |
 | Settings | `A` APN, `I` AI setup, `C` carrier scan, `W` Wi-Fi, `B` BLE, `F/K` lights, `D` status, `R` modem refresh |
 | Carrier scan | `R` rescan, `J/K` results pages; up to three minutes |
 | Wi-Fi | `W` radio toggle, `R` scan, `J/K` select, Enter connect, `N` hidden SSID, `F` forget |
 | BLE | `B` radio toggle, `P` phone visibility, `R` discovery, `J/K` select, Enter keyboard pairing, `C` reconnect, `F/X` forget |
 | APN editor | Enter saves and applies the APN; `Sym` cancels |
-| Message detail | Any key returns to the inbox |
 
 Hold `Shift` for uppercase and `Alt` for the printed alternate symbols when composing. The microphone key is not a voice-input feature. The e-paper display coalesces typing and refreshes slowly; USB output provides a quicker view while debugging.
 
-Outbound SMS accepts printable ASCII characters available in GSM-7, up to 160 septets; extension characters such as `{`, `}` and `\` each consume two. Incoming single-part GSM-7 and UCS-2 messages from numeric senders are supported. Multipart messages, alphanumeric senders and other encodings remain on the SIM. UTF-8 text is retained in history and USB output; unsupported e-paper font characters appear as `?`.
+Outbound SMS accepts printable ASCII characters available in GSM-7, up to 160 septets; extension characters such as `{`, `}` and `\` each consume two. Incoming single-part GSM-7 and UCS-2 messages from numeric senders are supported. Multipart messages, alphanumeric senders and other encodings remain in their original SIM or modem store. New reception prefers modem (ME) storage so a full SIM does not consume all receiving space; setup falls back to SIM storage if ME reception is unavailable. Both stores are scanned at boot and by the inbox import control. UTF-8 text is retained in history and USB output; unsupported e-paper font characters appear as `?`.
 
-“Modem accepted” confirms an SMS submission, not delivery to the recipient. “Transmitted” confirms the LoRa radio completed transmission, not reception by another device. An interrupted operation may become “Result unknown”; check the receiving device before manually retrying. SIM messages are never automatically deleted.
+“Modem accepted” confirms an SMS submission, not delivery to the recipient. “Transmitted” confirms the LoRa radio completed transmission, not reception by another device. An interrupted operation may become “Result unknown”; check the receiving device before manually retrying. Stored SMS messages are never automatically deleted; a full receiving store can block new delivery.
 
 ## Settings app
 
-Press `S` on Home. Light changes save automatically in NVS; the front light is available on v1.1. The APN editor accepts 1–63 letters, digits, dots or hyphens. It suggests `fast.t-mobile.com` when no APN is saved; nothing is applied until Enter is pressed. A saved APN is applied as context 1 with `IPV4V6` when the modem is ready, and restored at boot. The firmware does not start a mobile-data session. A working APN cannot add radio bands or establish carrier eligibility.
+Press `S` on Home. Light changes save automatically in NVS; the front light is available on v1.1. The APN editor accepts 1–63 letters, digits, dots or hyphens. It suggests `fast.t-mobile.com` when no APN is saved; nothing is applied until Enter is pressed. A saved APN is applied as context 1 with `IPV4V6` when the modem is ready, and restored at boot. An explicit AI request can open LTE packet data; saving setup or starting the device does not send a provider request. A working APN cannot add radio bands or establish carrier eligibility.
 
 See [connectivity setup](docs/CONNECTIVITY.md) for the carrier scan, Wi-Fi credentials, BLE keyboard support, phone GATT service and pairing controls. The ESP32-S3 supports Bluetooth LE; Bluetooth Classic keyboards are incompatible. Wi-Fi and BLE start disabled until explicitly enabled.
 
-Press **A** from Home for AI Chat, or **S → I** for its endpoint, model and masked API key. The default is OpenAI with `gpt-5.6-luna`; other providers must implement the HTTPS Chat Completions format. The API key is stored on the device, and conversations stay in RAM. AI uses Wi-Fi; it does not use the cellular modem's data connection. Provider authentication and generated replies remain unverified. See [AI setup and controls](docs/AI_CHAT.md).
+Open **AI Assistant** in Messages, press **A** from Home, or use **S → I** for its endpoint, model and masked API key. In the AI thread, **...** opens setup. The four fixed model presets are GPT-5.6 Luna, Terra, Sol and GPT-5.4 Mini; **Custom** accepts another provider model ID. A preset does not establish account access. The default is OpenAI `gpt-5.6-luna`; other providers must implement HTTPS Chat Completions.
+
+AI prefers connected Wi-Fi and otherwise uses ready LTE service. Turn Wi-Fi off in Settings W to explicitly test LTE. The thread reports the connection, key presence and active transport. Both paths verify HTTPS certificates and hostname; the LTE path runs TLS on the ESP32 over a modem TCP socket. Failed requests are not automatically retried on another connection. The key stays in device settings and conversations stay in RAM. Browser key setup, physical composition and a live Wi-Fi provider reply passed on the earlier interface; the new conversation/touch UI, LTE path and 500-character enforcement still need final hardware checks. See [AI setup and controls](docs/AI_CHAT.md).
 
 ## USB console
 
@@ -117,7 +125,7 @@ keys off
 home
 ```
 
-The modem command accepts a small allowlist of read-only network queries. `modem restart` explicitly restarts the cellular module after a SIM change. `modem auto` requests automatic carrier selection. These operations refuse to interrupt active cellular work; automatic selection and an explicit `AT+COPS=?` scan can each take up to three minutes. Wait for completion before further cellular operations.
+The modem command accepts a small allowlist of read-only network queries. `modem inbox-me` explicitly dumps raw modem-store SMS PDUs, imports supported incoming messages, then restores the SIM read store; keep its output private. Reading may mark messages read and never deletes them. `modem restart` explicitly restarts the cellular module after a SIM change. `modem auto` requests automatic carrier selection. These operations refuse to interrupt active cellular work; automatic selection and an explicit `AT+COPS=?` scan can each take up to three minutes. Wait for completion before further cellular operations.
 
 These commands perform real sends/call operations when the necessary hardware and service are available:
 

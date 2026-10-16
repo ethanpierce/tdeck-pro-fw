@@ -32,8 +32,13 @@ the modem's limited overlap with US T-Mobile radio bands.
    allow it to complete before more cellular work.
    After a SIM change, use `modem restart`; `modem auto` requests automatic
    selection when idle. Neither command sends a message or places a call.
-3. Proceed to consented two-way SMS only after an appropriate registration
-   state. Test reception, submission, reset persistence and duplicate filtering.
+3. One consenting recipient confirmed receiving an outbound SMS. Their reply
+   was not found: the SIM store was full (5/5) and modem memory empty (0/180).
+   The new setup prefers ME reception, retaining all SIM messages, and imports
+   both stores. After flashing, verify `modem AT+CPMS?` shows SM/SM/ME (or the
+   reported SM fallback), then confirm a fresh incoming SMS, reset persistence
+   and duplicate filtering. A full SIM is a plausible delivery blocker, not a
+   confirmed explanation for the missing reply. Neither store is auto-deleted.
 4. Test calls and microphone/speaker audio separately once carrier voice support
    is established. AT/SIM success alone does not prove VoLTE or working audio.
 
@@ -57,16 +62,31 @@ the modem's limited overlap with US T-Mobile radio bands.
 - Keep factory dumps, SIM contents, raw logs, camera images and local settings
   outside the public repository. Local backups are not replaced by a new build.
 
-Future app work: contacts, timestamps, Unicode fonts, message deletion, touch,
+Future app work: contacts, timestamps, Unicode fonts, message deletion, additional touch gestures,
 interoperable radio protocols, audio setup and measured power management.
 
-## AI Chat and release testing
+## Conversations, touch and AI testing
 
-AI Chat uses Wi-Fi and a configurable HTTPS Chat Completions endpoint. Its default
-is OpenAI `gpt-5.6-luna`; enter an API key in Settings I before an authenticated
-provider test. Host tests cover JSON, bounds, credential-safe errors and saved
-configuration. A real provider reply, physical editing and restart retention
-remain separate hardware checks. See [AI_CHAT.md](docs/AI_CHAT.md).
+Messages now has one SMS thread per numeric peer, one AI Assistant thread and a
+shared Nearby LoRa broadcast group. Select with J/K and Enter or tap a row.
+Type immediately in a thread; Enter or Send submits. Scroll with Older/Newer or
+Shift + Alt + K/J. Ordinary N/J/K/C letters remain text. Verify the new list,
+reply-address grouping, inline compose and back navigation on the device.
+Touch is enabled only for a recognized CST328/CST3530 controller reporting
+240×320; verify row selection, distinct Send hit area and stale-screen handling.
+
+The earlier AI build passed browser setup, physical composition and a live
+Wi-Fi provider request using OpenAI `gpt-5.6-luna`; the camera confirmed the
+reply and LTE header. New hardware checks remain: the unified thread controls,
+four model presets plus Custom, the 500-character limit, Wi-Fi's separate
+three-bar header, and API-key retention after a restart. Model presets are a
+fixed convenience list and do not establish provider/account access.
+
+The AI transport now prefers connected Wi-Fi and otherwise uses LTE with
+ESP32-verified TLS over the cellular task's TCP broker. Force an LTE test by
+turning Wi-Fi off, then check that the thread reports LTE and a provider reply
+returns. This LTE request has not yet passed on hardware. Keep the key on the
+device and out of chat/logs. See [AI_CHAT.md](docs/AI_CHAT.md).
 
 Public firmware uses [the browser installer](https://ethanpierce.github.io/tdeck-pro-fw/)
 and separate simple [macOS](docs/INSTALL_MACOS.md) / [Windows](docs/INSTALL_WINDOWS.md)

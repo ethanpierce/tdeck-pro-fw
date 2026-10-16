@@ -4,7 +4,7 @@
 class Keyboard {
 public:
     bool begin();
-    char poll(); // ASCII, '\b', '\r', or ESC (Sym key = home).
+    char poll(); // ASCII, backspace/Enter/ESC; 17/18 = Shift+Alt+K/J thread scroll.
     bool ready = false;
     bool trace = false;
 private:

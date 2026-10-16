@@ -5,6 +5,11 @@
 #include <vector>
 namespace deck {
 constexpr size_t AiPromptLimit=384, AiReplyLimit=2048, AiBodyLimit=8192, AiHistoryLimit=8;
+constexpr size_t AiReplyCharacters=500;
+inline constexpr const char AiSystemPrompt[]=
+    "You are answering on a small 240x320 e-paper handheld. "
+    "Keep every reply within 500 Unicode characters total, including spaces and line breaks. "
+    "Be concise. Use plain text; avoid tables and long lists.";
 struct AiConfig {
     uint32_t magic=0x444b4101;
     char endpoint[192]="https://api.openai.com/v1";
@@ -17,7 +22,7 @@ bool validAiEndpoint(const std::string& value);
 bool validAiConfig(const AiConfig& value);
 uint32_t aiConfigChecksum(const AiConfig& value);
 std::string aiCompletionUrl(const std::string& endpoint);
-bool aiRequest(const std::string& model,const std::vector<AiMessage>& history,const std::string& prompt,std::string& json,bool openAiLunaProfile=false);
+bool aiRequest(const std::string& model,const std::vector<AiMessage>& history,const std::string& prompt,std::string& json,bool openAiEndpoint=false);
 struct AiReply {bool ok=false;bool truncated=false;std::string text,error;};
 AiReply aiResponse(int status,const std::string& body);
 std::vector<std::string> aiDisplayLines(const std::vector<AiMessage>& history,size_t columns=35);

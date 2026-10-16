@@ -54,6 +54,8 @@ The browser installer loads [ESP Web Tools 10.4.0](https://github.com/esphome/es
 
 ## Hardware and behavior references
 
+The minimal touch reader and packet decoder in `src/touch_input.*` and `lib/DeckCore/src/touch_packet.*` follow the CST328/CST3530 register and packet definitions in LILYGO's [Hynitron examples at `02b3e82a64926a1d9f907f3b5538a40d1e48795c`](https://github.com/Xinyuan-LilyGO/T-Deck-Pro/tree/02b3e82a64926a1d9f907f3b5538a40d1e48795c/examples/touch_hyn_core/arduino). The upstream repository's [MIT notice](docs/licenses/LILYGO-touch-MIT.txt) is retained. No controller firmware image, update code, calibration routine or factory application is included.
+
 - [LILYGO T-Deck Pro](https://github.com/Xinyuan-LilyGO/T-Deck-Pro), reference commit `53bcfa593b1df064894a8efc5a7e15e4524b09d2`: board pin definitions, modem startup examples, display and keyboard hardware facts.
 - [LILYGO v1.1 / HD-V2-250915](https://github.com/Xinyuan-LilyGO/T-Deck-Pro/tree/02b3e82a64926a1d9f907f3b5538a40d1e48795c): v1.1 reset wiring and revision-specific peripherals.
 - [Meshtastic TDeckProKeyboard.cpp](https://github.com/meshtastic/firmware/blob/master/src/input/TDeckProKeyboard.cpp): cross-check of physical keyboard event numbers, Space/Sym and modifiers. No complete Meshtastic implementation was copied, and the starter does not implement the Meshtastic protocol.

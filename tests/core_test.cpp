@@ -257,6 +257,11 @@ static void keyboardTests() {
     keyboard.feed(35);CHECK(keyboard.feed(128+9)=='w');
     keyboard.feed(128+30);keyboard.feed(128+31);CHECK(keyboard.feed(128+9)=='1');
     keyboard.feed(30);keyboard.feed(31);
+    keyboard.feed(128+30);keyboard.feed(128+35);
+    CHECK(keyboard.feed(128+13)==17);CHECK(keyboard.feed(128+14)==18);
+    keyboard.feed(35);CHECK(keyboard.feed(128+13)=='\'');CHECK(keyboard.feed(128+14)==';');
+    keyboard.feed(128+31);CHECK(keyboard.feed(128+13)==17);CHECK(keyboard.feed(128+14)==18);
+    keyboard.feed(30);keyboard.feed(31);CHECK(keyboard.feed(128+13)=='k');CHECK(keyboard.feed(128+14)=='j');
     CHECK(keyboard.feed(0)==0 && keyboard.feed(128)==0 && keyboard.feed(128+36)==0);
     const char base[29]={'p','o','i','u','y','t','r','e','w','q','\b','l','k','j','h','g','f','d','s','a','\r','$','m','n','b','v','c','x','z'};
     const char alternate[29]={'@','+','-','_',')','(','3','2','1','#','\b','"','\'',';',':','/','6','5','4','*','\r','$','.',',','!','?','9','8','7'};

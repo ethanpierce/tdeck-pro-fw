@@ -12,6 +12,9 @@
 #include <cassert>
 #include <stdexcept>
 #include <map>
+#ifdef DECK_CELLULAR_SOCKET_TEST
+#include "../src/cellular_socket.h"
+#endif
 // Exercise the actual UART-owner loop with fake hardware and a deterministic clock.
 #include "../src/modem_task.cpp"
 FakeSerial Serial1;
@@ -59,12 +62,12 @@ int main(){
             if(cmd=="AT"&&n<3)return true;
             if(cmd=="AT+CPIN?"&&n==1){Serial1.feed("+CPIN: SIM PIN\r\nOK\r\n");return true;}
             if(cmd=="AT+CPIN?"&&n==2)readyAt=current;
-            if(cmd.rfind("AT+CPMS=",0)==0&&n==1){Serial1.feed("+CMS ERROR: 310\r\n");return true;}
+            if(cmd=="AT+CPMS=\"SM\",\"SM\",\"ME\""&&n==1){Serial1.feed("+CMS ERROR: 310\r\n");return true;}
             return false;
         };
         h.run();assert(h.count["AT"]==3);assert(readyAt>15000);assert(h.count["AT+CMGF=0"]==2);
         for(auto& entry:h.tx)if(entry.second=="AT+CMGF=0\r")assert(entry.first>=readyAt);
-        assert(h.smsReady());assert(h.count["AT+CMGL=4"]==1);assert(h.totalPrefix("ATD")==0);assert(h.totalPrefix("AT+CMGS=")==0);
+        assert(h.smsReady());assert(h.count["AT+CMGL=4"]==2);assert(h.totalPrefix("ATD")==0);assert(h.totalPrefix("AT+CMGS=")==0);
         std::cout<<"PASS slow boot, late SIM, storage retry, no boot transmissions\n";
     }
     {
@@ -78,7 +81,7 @@ int main(){
         Harness h(72000);
         h.custom=[&](const std::string& cmd,unsigned){return !cmd.empty()&&cmd.back()=='\x1a';};
         tickHook=[&]{if(current==500)h.action(CellActionKind::Sms,41);if(current==600)h.action(CellActionKind::Sms,42);};
-        h.run();assert(h.totalPrefix("AT+CMGS=")==1);assert(h.count["AT"]==2);assert(h.smsReady());assert(h.count["AT+CMGL=4"]==2);
+        h.run();assert(h.totalPrefix("AT+CMGS=")==1);assert(h.count["AT"]==2);assert(h.smsReady());assert(h.count["AT+CMGL=4"]==4);
         bool unknown=false,rejected=false;
         for(const auto& e:h.events())if(e.kind==CellEventKind::Failed){if(e.id==41)unknown=e.value==1;if(e.id==42)rejected=e.value==0;}
         assert(unknown&&rejected);
@@ -226,8 +229,8 @@ int main(){
             return true;
         };
         tickHook=[&]{if(current==500)h.request(CellActionKind::NetworkQuery,"inbox-me");};
-        h.run();assert(store=="SM" && h.smsReady() && smScans==2 && meScans==1);
-        assert(h.count["AT+CPMS=\"ME\""]==1 && h.count["AT+CPMS=\"SM\""]==1);
+        h.run();assert(store=="SM" && h.smsReady() && smScans==3 && meScans==2);
+        assert(h.count["AT+CPMS=\"ME\""]==2 && h.count["AT+CPMS=\"SM\""]==2);
         unsigned received=0;for(const auto& e:h.events())if(e.kind==CellEventKind::SmsIn) {
             ++received;assert(std::string(e.text)=="hello");
         }
@@ -241,7 +244,7 @@ int main(){
             Serial1.feed("+CMS ERROR: 302\r\n");return true;
         };
         tickHook=[&]{if(current==500)h.request(CellActionKind::NetworkQuery,"inbox-me");};
-        h.run();assert(h.smsReady() && h.count["AT+CPMS=\"SM\""]==1 && h.count["AT+CMGL=4"]==1);
+        h.run();assert(h.smsReady() && h.count["AT+CPMS=\"SM\""]==2 && h.count["AT+CMGL=4"]==1);
         std::cout<<"PASS unavailable ME storage restores SM and does not scan the wrong inbox\n";
     }
     {
@@ -251,21 +254,21 @@ int main(){
             if(cmd=="AT+CPMS=\"SM\"") {
                 Serial1.feed("+CMS ERROR: 310\r\n+CMTI: \"SM\",4\r\n");return true;
             }
-            if(cmd=="AT+CPMS=\"SM\",\"SM\",\"SM\"")store="SM";
+            if(cmd=="AT+CPMS=\"SM\",\"SM\",\"SM\"" || cmd=="AT+CPMS=\"SM\",\"SM\",\"ME\"")store="SM";
             if(cmd=="AT+CMGL=4" && store=="ME")++meScans;
             if(cmd.rfind("AT+CMGR=",0)==0)assert(store=="SM");
             return false;
         };
         tickHook=[&]{if(current==500)h.request(CellActionKind::NetworkQuery,"inbox-me");};
-        h.run();assert(store=="SM" && h.smsReady() && meScans==1);
-        assert(h.count["AT+CPMS=\"SM\",\"SM\",\"SM\""]==2 && h.count["AT+CMGL=4"]==3);
+        h.run();assert(store=="SM" && h.smsReady() && meScans==2);
+        assert(h.count["AT+CPMS=\"SM\",\"SM\",\"ME\""]==3 && h.count["AT+CMGL=4"]==5);
         std::cout<<"PASS failed SM restore blocks slot reads until full SMS setup repairs the storage selection\n";
     }
     {
         Harness h(41000);std::string store="SM";unsigned meScans=0;
         h.custom=[&](const std::string& cmd,unsigned){
             if(cmd=="AT+CPMS=\"ME\"")store="ME";
-            if(cmd=="AT+CPMS=\"SM\",\"SM\",\"SM\"")store="SM";
+            if(cmd=="AT+CPMS=\"SM\",\"SM\",\"SM\"" || cmd=="AT+CPMS=\"SM\",\"SM\",\"ME\"")store="SM";
             if(cmd=="AT+CMGL=4" && store=="ME") {++meScans;return true;}
             return false;
         };
@@ -281,9 +284,224 @@ int main(){
             if(current==500)h.action(CellActionKind::Sms,81);
             if(current==600)h.request(CellActionKind::NetworkQuery,"inbox-me");
         };
-        h.run();assert(h.totalPrefix("AT+CMGS=")==1 && h.count["AT+CPMS=\"ME\""]==0);
+        h.run();assert(h.totalPrefix("AT+CMGS=")==1 && h.count["AT+CPMS=\"ME\""]==1);
         bool refused=false;for(const auto& e:h.events())if(e.kind==CellEventKind::Trace && std::string(e.text).find("retry inbox-me shortly")!=std::string::npos)refused=true;
         assert(refused);std::cout<<"PASS ME inbox inspection refuses to interrupt an SMS\n";
     }
+    {
+        Harness h(2000);std::string store="SM",receive="SM";unsigned smScans=0,meScans=0;
+        bool second=false;
+        const std::string first="00000B915155214365F700006210610000000005E8329BFD06";
+        const std::string later="00000B915155214365F700006210610000010005E8329BFD06";
+        const std::string carrier="00400B915155214365F70000621061000000000B050003CC0201E8329BFD06";
+        h.custom=[&](const std::string& cmd,unsigned){
+            if(cmd=="AT+CPMS=\"SM\",\"SM\",\"ME\"") {
+                store="SM";receive="ME";Serial1.feed("+CPMS: 5,5,5,5,1,180\r\nOK\r\n");return true;
+            }
+            if(cmd=="AT+CPMS=\"ME\"")store="ME";
+            if(cmd=="AT+CPMS=\"SM\"")store="SM";
+            if(cmd!="AT+CMGL=4")return false;
+            std::string result;
+            if(store=="SM") {
+                ++smScans;
+                for(unsigned i=1;i<=5;++i)result+="+CMGL: "+std::to_string(i)+",1,,25\r\n"+carrier+"\r\n";
+            } else {
+                ++meScans;result="+CMGL: 1,0,,20\r\n"+first+"\r\n";
+                if(second)result+="+CMGL: 2,0,,20\r\n"+later+"\r\n";
+            }
+            Serial1.feed(result+"OK\r\n");return true;
+        };
+        tickHook=[&]{
+            if(current==500){second=true;Serial1.feed("+CMTI: \"ME\",2\r\n");}
+            if(current==1000)h.action(CellActionKind::ReadInbox);
+        };
+        h.run();assert(h.smsReady() && store=="SM" && receive=="ME" && smScans==2 && meScans==3);
+        unsigned received=0;
+        for(const auto& e:h.events()) {
+            if(e.kind==CellEventKind::SmsIn)++received;
+            if(e.kind==CellEventKind::Trace) {
+                const std::string text=e.text;
+                assert(text.find(first)==std::string::npos && text.find(carrier)==std::string::npos && text.rfind("+CMGL:",0)!=0);
+            }
+        }
+        assert(received==2 && h.totalPrefix("AT+CMGD")==0 && h.totalPrefix("AT+CMGS=")==0 && h.count["AT+CFUN=1,1"]==0);
+        std::cout<<"PASS full SIM is preserved while ME receives/imports, both stores rescan on request, duplicates suppressed and automatic PDUs stay private\n";
+    }
+    {
+        Harness h(2000);std::string store="SM";unsigned received=0;
+        const std::string first="00000B915155214365F700006210610000000005E8329BFD06";
+        h.custom=[&](const std::string& cmd,unsigned){
+            if(cmd=="AT+CPMS=\"SM\",\"SM\",\"ME\"" || cmd=="AT+CPMS=\"ME\"") {
+                Serial1.feed("+CMS ERROR: 302\r\n");return true;
+            }
+            if(cmd=="AT+CPMS=\"SM\",\"SM\",\"SM\"") {
+                store="SM";Serial1.feed("+CPMS: 5,5,5,5,5,5\r\nOK\r\n");return true;
+            }
+            if(cmd=="AT+CPMS=\"SM\"")store="SM";
+            if(cmd.rfind("AT+CMGR=",0)==0) {
+                assert(store=="SM");Serial1.feed("+CMGR: 0,,20\r\n"+first+"\r\nOK\r\n");return true;
+            }
+            return false;
+        };
+        tickHook=[&]{if(current==500)Serial1.feed("+CMTI: \"SM\",3\r\n");};
+        h.run();assert(h.smsReady() && h.count["AT+CPMS=\"SM\",\"SM\",\"SM\""]==1 && h.count["AT+CPMS=\"ME\""]==1);
+        bool warned=false;
+        for(const auto& e:h.events()) {
+            if(e.kind==CellEventKind::SmsIn)++received;
+            if(e.kind==CellEventKind::Trace && std::string(e.text).find("Incoming SMS storage is full")!=std::string::npos)warned=true;
+        }
+        assert(received==1 && warned && h.totalPrefix("AT+CMGD")==0);
+        std::cout<<"PASS unsupported ME safely falls back to SIM, warns that the receive store is full and still reads SIM notifications\n";
+    }
+    {
+        Harness h(2500);std::string store="SM";unsigned smScans=0,meScans=0;
+        h.custom=[&](const std::string& cmd,unsigned){
+            if(cmd=="AT+CPMS=\"ME\"")store="ME";
+            if(cmd=="AT+CPMS=\"SM\"")store="SM";
+            if(cmd.rfind("AT+CMGR=",0)==0)assert(store=="SM");
+            if(cmd!="AT+CMGL=4")return false;
+            if(store=="SM") {++smScans;Serial1.feed("OK\r\n");return true;}
+            ++meScans;std::string result;
+            if(meScans==1) {
+                result="+CMTI: \"SM\",3\r\n+CMTI: \"ME\",2\r\n";
+                h.action(CellActionKind::ReadInbox); // Request during temporary ME selection is retained.
+            }
+            for(int i=0;i<100;++i) {
+                char time[32];snprintf(time,sizeof(time),"6210610000%02X00",i);
+                result+="+CMGL: "+std::to_string(i+1)+",1,,20\r\n00000B915155214365F70000"+std::string(time)+"05E8329BFD06\r\n";
+            }
+            Serial1.feed(result+"OK\r\n");return true;
+        };
+        h.run();assert(h.smsReady() && store=="SM" && smScans==2 && meScans==2);
+        unsigned received=0;for(const auto& e:h.events())if(e.kind==CellEventKind::SmsIn)++received;
+        assert(received==100 && h.totalPrefix("AT+CMGD")==0 && h.totalPrefix("AT+CMGS=")==0);
+        std::cout<<"PASS 100-message ME stream handles interleaved SM/ME indications and a concurrent import request without duplicate delivery\n";
+    }
+    {
+        Harness h(19000);std::string store="SM";unsigned meScans=0;
+        const auto droppedBefore=droppedCellEvents.load();
+        vQueueDelete(cellEvents);cellEvents=xQueueCreate(1,sizeof(CellEvent));
+        h.custom=[&](const std::string& cmd,unsigned){
+            if(cmd=="AT+CPMS=\"ME\"")store="ME";
+            if(cmd=="AT+CPMS=\"SM\"")store="SM";
+            if(cmd=="AT+CMGL=4" && store=="ME") {
+                ++meScans;Serial1.feed("+CMGL: 1,0,,20\r\n00000B915155214365F700006210610000000005E8329BFD06\r\nOK\r\n");return true;
+            }
+            return false;
+        };
+        tickHook=[&]{if(current==500){vQueueDelete(cellEvents);cellEvents=xQueueCreate(4096,sizeof(CellEvent));}};
+        h.run();const bool ready=h.smsReady();unsigned received=0;
+        for(const auto& e:h.events())if(e.kind==CellEventKind::SmsIn)++received;
+        assert(ready && received==1 && meScans==2 && droppedCellEvents.load()>droppedBefore);
+        assert(h.totalPrefix("AT+CMGD")==0 && h.totalPrefix("AT+CMGS=")==0 && h.count["AT"]==1);
+        std::cout<<"PASS full UI queue leaves ME message pending for bounded retry and does not send, delete or reset\n";
+    }
+#ifdef DECK_CELLULAR_SOCKET_TEST
+    {
+        Harness h(2500);std::string store="SM";bool incoming=false;
+        const std::string ciphertext=std::string("\x16\x03\x03\0\x07",5)+"TLS\r\n>A";
+        const std::string payload="\r\nOK\r\n+CMTI: \"SM\",88\r\n+CEREG: 2,3\r\n";
+        std::string hex;const char* digits="0123456789ABCDEF";
+        for(unsigned char c:payload){hex+=digits[c>>4];hex+=digits[c&15];}
+        void* request=nullptr;unsigned stage=0;
+        h.custom=[&](const std::string& cmd,unsigned){
+            if(cmd=="AT+CPMS=\"ME\"")store="ME";
+            if(cmd=="AT+CPMS=\"SM\"")store="SM";
+            if(cmd=="AT+NETOPEN?"){Serial1.feed("+NETOPEN: 1\r\nOK\r\n");return true;}
+            if(cmd.rfind("AT+CIPOPEN=9,",0)==0) {
+                Serial1.feed("+CIPOPEN: 8,0\r\n+CIPOPEN: 9,0\r\nOK\r\n");return true;
+            }
+            if(cmd.rfind("AT+CIPSEND=9,",0)==0){Serial1.feed("> ");return true;}
+            if(cmd==ciphertext) {
+                Serial1.feed("+CIPSEND: 9,"+std::to_string(ciphertext.size())+","+std::to_string(ciphertext.size())+"\r\nOK\r\n");return true;
+            }
+            if(cmd=="AT+CIPRXGET=3,9,256") {
+                incoming=true;
+                Serial1.feed("+CMTI: \"SM\",3\r\n+CIPRXGET: 3,9,"+std::to_string(payload.size())+",0\r\n"+hex+"\r\nOK\r\n");return true;
+            }
+            if(cmd=="AT+CIPCLOSE=9"){Serial1.feed("OK\r\n+CIPCLOSE: 9,0\r\n");return true;}
+            if(cmd=="AT+CMGL=4" && store=="SM" && incoming) {
+                Serial1.feed("+CMGL: 3,0,,20\r\n00000B915155214365F700006210610000000005E8329BFD06\r\nOK\r\n");return true;
+            }
+            return false;
+        };
+        tickHook=[&]{
+            if(current==500){assert(cellTcpReady());request=cellTcpTestSubmit(CellTcpTestKind::Open,"example.test");stage=1;assert(request);}
+            int result=0;std::string data;int64_t timestamp=0;
+            if(!request || !cellTcpTestTake(request,result,data,timestamp))return;
+            request=nullptr;
+            if(stage==1){assert(result==1);request=cellTcpTestSubmit(CellTcpTestKind::Write,ciphertext);stage=2;}
+            else if(stage==2){assert(result==int(ciphertext.size()));request=cellTcpTestSubmit(CellTcpTestKind::Read,"",256);stage=3;}
+            else if(stage==3){assert(result==int(payload.size()) && data==payload);request=cellTcpTestSubmit(CellTcpTestKind::Close);stage=4;}
+            else {assert(stage==4 && result==1);stage=5;}
+        };
+        h.run();assert(stage==5 && !request && h.smsReady() && store=="SM");
+        bool exactWrite=false;for(const auto& entry:h.tx)if(entry.second==ciphertext)exactWrite=true;
+        assert(exactWrite && h.count[ciphertext+"\x1a"]==0 && h.count["AT+CMGR=88"]==0 && h.totalPrefix("AT+CMGS=")==0);
+        unsigned received=0;
+        for(const auto& e:h.events()) {
+            if(e.kind==CellEventKind::SmsIn)++received;
+            if(e.kind==CellEventKind::Registration)assert(e.value!=3);
+        }
+        assert(received==1);
+        std::cout<<"PASS UART-owner TCP open/binary write/hex read/close, no Ctrl-Z, payload cannot forge URCs and real SIM notification still imports\n";
+    }
+    {
+        Harness h(2000);void* request=nullptr;bool done=false;uint32_t openedAt=0;std::string store="SM";
+        h.custom=[&](const std::string& cmd,unsigned){
+            if(cmd=="AT+CPMS=\"ME\"")store="ME";
+            if(cmd=="AT+CPMS=\"SM\"")store="SM";
+            if(cmd=="AT+NETOPEN?"){Serial1.feed("+NETOPEN: 0\r\nOK\r\n");return true;}
+            if(cmd=="AT+NETOPEN"){openedAt=current+200;Serial1.feed("OK\r\n");return true;}
+            if(cmd.rfind("AT+CIPOPEN=9,",0)==0){Serial1.feed("OK\r\n+CIPOPEN: 9,3\r\n");return true;}
+            if(cmd=="AT+CMGL=4" && store=="ME" && openedAt) {
+                Serial1.feed("+CMGL: 1,0,,20\r\n00000B915155214365F700006210610000000005E8329BFD06\r\nOK\r\n");return true;
+            }
+            return false;
+        };
+        tickHook=[&]{
+            if(current==500){request=cellTcpTestSubmit(CellTcpTestKind::Open,"example.test");assert(request);}
+            if(openedAt && current==openedAt)Serial1.feed("+CMTI: \"ME\",1\r\n+NETOPEN: 0\r\n");
+            int result=0;std::string data;int64_t timestamp=0;
+            if(request && cellTcpTestTake(request,result,data,timestamp)){assert(result==-1);request=nullptr;done=true;}
+        };
+        h.run();assert(done && h.smsReady() && store=="SM" && h.count["AT+NETOPEN"]==1 && h.totalPrefix("AT+CIPSEND=")==0);
+        unsigned received=0;for(const auto& e:h.events())if(e.kind==CellEventKind::SmsIn)++received;
+        assert(received==1 && h.totalPrefix("AT+CMGS=")==0);
+        std::cout<<"PASS delayed NETOPEN result and failed TCP connection retain interleaved ME notification without sending application data\n";
+    }
+    {
+        Harness h(7500);void* request=nullptr;bool cancelled=false;
+        h.custom=[&](const std::string& cmd,unsigned){
+            if(cmd=="AT+NETOPEN?"){Serial1.feed("+NETOPEN: 1\r\nOK\r\n");return true;}
+            if(cmd.rfind("AT+CIPOPEN=9,",0)==0){Serial1.feed("OK\r\n");return true;}
+            return false;
+        };
+        tickHook=[&]{
+            if(current==500){request=cellTcpTestSubmit(CellTcpTestKind::Open,"example.test");assert(request);}
+            if(current==600)Serial1.feed("RDY\r\n");
+            if(current==700)Serial1.feed("+CIPOPEN: 9,0\r\n"); // Stale result from before the reset.
+            int result=0;std::string data;int64_t timestamp=0;
+            if(request && cellTcpTestTake(request,result,data,timestamp)){assert(result==-1);request=nullptr;cancelled=true;}
+        };
+        h.run();assert(cancelled && h.smsReady() && cellTcpReady() && h.count["AT"]==2);
+        assert(h.totalPrefix("AT+CIPOPEN=")==1 && h.totalPrefix("AT+CMGS=")==0 && h.count["AT+CFUN=1,1"]==0);
+        std::cout<<"PASS modem restart cancels socket request, ignores stale result and restores SMS without socket/SMS replay\n";
+    }
+    {
+        Harness h(3000);void* request=nullptr;bool expired=false;
+        h.custom=[&](const std::string& cmd,unsigned){return !cmd.empty() && cmd.back()=='\x1a';};
+        tickHook=[&]{
+            if(current==500)h.action(CellActionKind::Sms,91);
+            if(current==600){request=cellTcpTestSubmit(CellTcpTestKind::Open,"example.test",443,500);assert(request);}
+            if(current==2000)Serial1.feed("+CMGS: 91\r\nOK\r\n");
+            int result=0;std::string data;int64_t timestamp=0;
+            if(request && cellTcpTestTake(request,result,data,timestamp)){assert(result==-1);request=nullptr;expired=true;}
+        };
+        h.run();assert(expired && h.smsReady() && h.totalPrefix("AT+CMGS=")==1);
+        assert(h.count["AT+CIPMODE=0"]==0 && h.totalPrefix("AT+CIPOPEN=")==0 && h.count["AT+CFUN=1,1"]==0);
+        std::cout<<"PASS socket request expires while waiting behind an SMS and never starts a stale network operation or resends SMS\n";
+    }
+#endif
     vQueueDelete(cellEvents);vQueueDelete(cellActions);cellEvents=cellActions=nullptr;
 }

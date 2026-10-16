@@ -1,4 +1,6 @@
 #include "ai_chat.h"
+#include "cellular_http.h"
+#include "cellular_socket.h"
 #include <WiFi.h>
 #include <esp_http_client.h>
 #include <ctime>
@@ -24,18 +26,20 @@ bool AiChat::begin() {
 bool AiChat::send(const deck::AiConfig& config,const String& prompt) {
     if(busy){status="Wait for the current AI request";return false;}
     if(!available){status="AI worker unavailable";return false;}
-    if(WiFi.status()!=WL_CONNECTED){status="Connect Wi-Fi first: Settings > W";return false;}
+    const bool cellular=WiFi.status()!=WL_CONNECTED;
+    if(cellular && !cellTcpReady()){status="Connect Wi-Fi or wait for LTE data service";return false;}
     if(!deck::validAiConfig(config) || !config.model[0]){status="Set an HTTPS endpoint and model in Settings > I";return false;}
     const auto url=deck::aiCompletionUrl(config.endpoint);
     if(!config.key[0] && url.find("https://api.openai.com/")==0){status="Add your API key in Settings > I";return false;}
     auto* job=new(std::nothrow) Job;
     if(!job){status="Not enough memory for AI request";return false;}
     job->url=url;
+    job->cellular=cellular;
     const bool openAiProfile=url=="https://api.openai.com/v1/chat/completions" || url=="https://api.openai.com:443/v1/chat/completions";
     if(!deck::aiRequest(config.model,history_,prompt.c_str(),job->body,openAiProfile)){delete job;status="Use 1-384 characters and a valid model";return false;}
     job->key=config.key;
     if(xQueueSend(jobs_,&job,0)!=pdTRUE){delete job;status="AI busy; try again";return false;}
-    pending_=prompt.c_str();busy=true;status="Asking AI over Wi-Fi...";return true;
+    pending_=prompt.c_str();busy=true;status=cellular?"Asking AI over LTE...":"Asking AI over Wi-Fi...";return true;
 }
 bool AiChat::poll() {
     Job* result=nullptr;if(!results_ || xQueueReceive(results_,&result,0)!=pdTRUE)return false;
@@ -45,7 +49,7 @@ bool AiChat::poll() {
         // prompt is never silently replayed when the user asks a new question.
         while(history_.size()+2>deck::AiHistoryLimit)history_.erase(history_.begin(),history_.begin()+2);
         history_.push_back({false,pending_});history_.push_back({true,std::move(result->reply.text)});
-        status=result->reply.truncated?"Reply shortened to fit; J/K read, N follow up":"Reply ready. J/K read, N follow up";
+        status=result->reply.truncated?"Reply shortened to 500 characters":"Reply received";
     } else status=result->reply.error.c_str();
     pending_.clear();delete result;return true;
 }
@@ -54,6 +58,7 @@ bool AiChat::clear() {
     history_.clear();pending_.clear();status="Chat cleared from this device";return true;
 }
 deck::AiReply AiChat::request(const Job& job) {
+    if(job.cellular)return cellularAiRequest(job.url,job.key,job.body);
     if(WiFi.status()!=WL_CONNECTED)return failure("Wi-Fi disconnected. No request sent.");
     // Certificate validity checks need the real date. Sync only following an
     // explicit send, never on startup. Do not fall back to insecure TLS.

@@ -4,6 +4,13 @@
 #include <array>
 #include <cctype>
 namespace deck {
+WifiIndicator wifiIndicator(bool enabled,bool connected,bool connecting,int dbm) {
+    if(!enabled)return {"Woff",0};
+    if(!connected)return {connecting?"W...":"W--",0};
+    uint8_t bars=0;
+    if(dbm>=-127 && dbm<0)bars=dbm>=-60?3:dbm>=-75?2:1;
+    return {"WiFi",bars};
+}
 CellularIndicator cellularIndicator(bool linked,bool simReady,int registration,int dbm,
     const std::string& operatorInfo,const std::string& systemInfo) {
     if(!linked)return {"...",0};

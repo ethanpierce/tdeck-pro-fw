@@ -19,6 +19,7 @@ struct AtCommand {
     bool callControl = false;
     std::function<void(const AtResult&)> done;
     std::function<void(const std::string&)> onLine = {}; // Stream large inbox scans without buffering them.
+    bool appendPayloadCtrlZ = true; // False for fixed-length binary TCP sends; SMS keeps Ctrl-Z.
 };
 // Single UART owner. Bounded input, explicit command results, interleaved URCs.
 class AtEngine {
@@ -40,6 +41,7 @@ private:
     AtResult result_;
     std::string line_;
     uint32_t now_ = 0, started_ = 0, cooledAt_ = 0;
+    uint32_t coolingDuration_ = 2000;
     size_t responseBytes_ = 0;
     bool active_ = false, prompted_ = false, dropping_ = false, cooling_ = false;
 };

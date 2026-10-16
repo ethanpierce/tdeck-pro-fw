@@ -173,7 +173,7 @@ form.addEventListener("submit", async (event) => {
     await saveField(s, "ai model " + input.model, "AI model saved");
     await saveField(s, "ai key " + input.key, "AI key saved");
     await closeDevice(s);
-    say("Saved on your T-Deck Pro. USB is disconnected and the key field is cleared. On the device, press A, then N to chat. Set up Wi-Fi first.");
+    say("Saved on your T-Deck Pro. USB is disconnected and the key field is cleared. On the device, press A, type a message, and press Enter. Chat uses Wi-Fi when connected, otherwise LTE.");
   } catch {
     await closeDevice(s);
     say("Setup did not finish. Some fields may have saved. Reconnect and try again; no API request was made.");

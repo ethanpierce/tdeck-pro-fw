@@ -1,4 +1,5 @@
 #include "ai_protocol.h"
+#include "ai_models.h"
 #include <algorithm>
 #include <cstring>
 #include <utility>
@@ -126,20 +127,18 @@ std::string aiCompletionUrl(const std::string& endpoint) {
     if(url.size()<std::strlen(suffix) || url.compare(url.size()-std::strlen(suffix),std::strlen(suffix),suffix))url+=suffix;
     return url;
 }
-bool aiRequest(const std::string& model,const std::vector<AiMessage>& history,const std::string& prompt,std::string& json,bool openAiLunaProfile) {
+bool aiRequest(const std::string& model,const std::vector<AiMessage>& history,const std::string& prompt,std::string& json,bool openAiEndpoint) {
     json.clear();if(!printable(model,95,false) || prompt.empty() || prompt.size()>AiPromptLimit || history.size()>AiHistoryLimit)return false;
     if(std::all_of(prompt.begin(),prompt.end(),[](unsigned char c){return c<=32;}))return false;
-    json="{\"model\":"+quoted(model)+",\"messages\":[";bool comma=false;
+    json="{\"model\":"+quoted(model)+",\"messages\":[{\"role\":\"system\",\"content\":"+quoted(AiSystemPrompt)+'}';
     for(const auto& m:history) {
         if(m.text.empty() || m.text.size()>AiReplyLimit){json.clear();return false;}
         if(!utf8Valid(m.text)){json.clear();return false;}
-        if(comma)json+=',';
-        comma=true;json+="{\"role\":";json+=m.assistant?"\"assistant\"":"\"user\"";json+=",\"content\":"+quoted(m.text)+'}';
+        json+=",{\"role\":";json+=m.assistant?"\"assistant\"":"\"user\"";json+=",\"content\":"+quoted(m.text)+'}';
     }
     if(!utf8Valid(prompt)){json.clear();return false;}
-    if(comma)json+=',';
-    json+="{\"role\":\"user\",\"content\":"+quoted(prompt)+"}],\"stream\":false";
-    if(openAiLunaProfile && model=="gpt-5.6-luna")json+=",\"max_completion_tokens\":1024,\"reasoning_effort\":\"none\"";
+    json+=",{\"role\":\"user\",\"content\":"+quoted(prompt)+"}],\"stream\":false";
+    if(openAiEndpoint && boundedOpenAiModel(model))json+=",\"max_completion_tokens\":256,\"reasoning_effort\":\"none\"";
     json+='}';
     if(json.size()>16384){json.clear();return false;}return true;
 }
@@ -156,8 +155,17 @@ AiReply aiResponse(int status,const std::string& body) {
     if(body.size()>AiBodyLimit){reply.error="API response exceeded 8 KB. No retry sent.";return reply;}
     Parser parser(body);
     if(!utf8Valid(body) || !parser.parse() || !parser.contentSeen || parser.content.empty()){reply.error="API returned no supported text response.";return reply;}
-    reply.ok=true;reply.text=std::move(parser.content);reply.truncated=reply.text.size()>AiReplyLimit || parser.finish=="length";
-    if(reply.text.size()>AiReplyLimit){size_t end=AiReplyLimit;while(end && (static_cast<unsigned char>(reply.text[end])&0xc0)==0x80)--end;reply.text.resize(end);}
+    reply.ok=true;reply.text=std::move(parser.content);reply.truncated=parser.finish=="length";
+    // The response has already passed UTF-8 validation. Count whole Unicode
+    // code points, including spaces/newlines, and retain both independent caps.
+    size_t end=0,characters=0;
+    while(end<reply.text.size() && characters<AiReplyCharacters) {
+        const auto first=static_cast<unsigned char>(reply.text[end]);
+        const size_t bytes=first<0x80?1:first<0xe0?2:first<0xf0?3:4;
+        if(end+bytes>AiReplyLimit)break;
+        end+=bytes;++characters;
+    }
+    if(end<reply.text.size()){reply.text.resize(end);reply.truncated=true;}
     return reply;
 }
 std::vector<std::string> aiDisplayLines(const std::vector<AiMessage>& history,size_t columns) {

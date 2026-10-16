@@ -14,7 +14,7 @@ public:
     String status="Set endpoint, model and key in Settings > I";
     const std::vector<deck::AiMessage>& messages()const{return history_;}
 private:
-    struct Job {std::string url,key,body;deck::AiReply reply;};
+    struct Job {std::string url,key,body;bool cellular=false;deck::AiReply reply;};
     QueueHandle_t jobs_=nullptr,results_=nullptr;
     std::vector<deck::AiMessage> history_;
     std::string pending_;

@@ -188,8 +188,9 @@ OPTIONAL AI CHAT
 After installing, open this link in desktop Chrome or Edge:
 {ai_setup_url}
 Connect the device, paste your provider's API key and choose Save to T-Deck Pro.
-Setup sends settings over USB and makes no AI request. Set up Wi-Fi on the device,
-then press A on the AI setup screen and N to write a question. Enter sends it.
+Setup sends settings over USB and makes no AI request. Press A on the AI setup
+screen, type into the conversation and press Enter (or tap Send). Chat prefers
+connected Wi-Fi; otherwise it uses LTE with working SIM/APN/data service.
 The API provider may charge for requests. The device stores the key unencrypted;
 keep the device and its flash backups private.
 

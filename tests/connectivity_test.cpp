@@ -3,6 +3,18 @@
 #include <iostream>
 #include <random>
 int main() {
+    auto wifi=[](bool enabled,bool connected,bool connecting,int dbm,const char* label,unsigned bars){
+        const auto value=deck::wifiIndicator(enabled,connected,connecting,dbm);
+        assert(std::string(value.label)==label && value.bars==bars);
+    };
+    wifi(false,true,true,-40,"Woff",0);
+    wifi(true,false,true,-40,"W...",0);
+    wifi(true,false,false,-40,"W--",0);
+    wifi(true,true,false,-30,"WiFi",3);wifi(true,true,false,-60,"WiFi",3);
+    wifi(true,true,false,-61,"WiFi",2);wifi(true,true,false,-75,"WiFi",2);
+    wifi(true,true,false,-76,"WiFi",1);wifi(true,true,false,-127,"WiFi",1);
+    for(int invalid:{-128,0,127})wifi(true,true,false,invalid,"WiFi",0);
+    std::cout<<"PASS Wi-Fi header state gating, RSSI levels and unknown signal\n";
     auto indicator=[](bool linked,bool sim,int reg,int dbm,const char* cops,const char* system,const char* label,unsigned bars){
         auto value=deck::cellularIndicator(linked,sim,reg,dbm,cops,system);
         assert(std::string(value.label)==label && value.bars==bars);

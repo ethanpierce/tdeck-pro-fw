@@ -4,6 +4,8 @@
 #include <sms_pdu.h>
 #include <apn.h>
 #include <connectivity.h>
+#include <conversations.h>
+#include <ai_models.h>
 #include "wifi_service.h"
 #include "ble_service.h"
 #include "ai_chat.h"
@@ -11,8 +13,10 @@
 #include "board.h"
 #include "device_settings.h"
 #include "keyboard.h"
+#include "touch_input.h"
 #include "message_store.h"
 #include "modem_task.h"
+#include "cellular_socket.h"
 #include "radio_service.h"
 #include "settings.h"
 #include <algorithm>
@@ -20,23 +24,27 @@
 
 namespace {
 Keyboard keyboard;
+TouchInput touch;
 MessageStore store;
 RadioService radio;
 DeviceSettings settings;
 WifiService wifi;
 AiSettings aiSettings;
 AiChat ai;
-unsigned aiOffset=0;
-enum class Page { Home, Messages, SmsNumber, SmsText, Phone, Radio, RadioText, Diagnostics, Detail, Settings, Apn, Carriers, Wifi, WifiSsid, WifiPassword, WifiForget, Ble, BlePair, BleForget, Ai, AiCompose, AiSetup, AiEndpoint, AiModel, AiKey };
+unsigned conversationCursor=0,threadScroll=0,modelCursor=0;
+constexpr unsigned ThreadRows=10;
+enum class Page { Home, Messages, SmsNumber, SmsThread, Phone, Radio, Diagnostics, Settings, Apn, Carriers, Wifi, WifiSsid, WifiPassword, WifiForget, Ble, BlePair, BleForget, Ai, AiSetup, AiModelPicker, AiEndpoint, AiModel, AiKey };
 Page page=Page::Home;
-Page detailReturn=Page::Messages;
+Page threadReturn=Page::Messages;
+Page aiSetupReturn=Page::Home;
 bool dirty=true, cellTask=false, linked=false, simReady=false, smsConfigured=false;
 int network=-1, signalDbm=0, battery=-1, callState=-1;
-uint32_t drawnAt=0, editedAt=0, batteryAt=0, detailId=0;
-unsigned refreshes=0, inboxOffset=0;
+uint32_t drawnAt=0, editedAt=0, batteryAt=0;
+unsigned refreshes=0;
 String notice="Starting radios...", sim="Checking", operatorName="Unknown", systemInfo="Not queried";
 String call="Idle", caller, input, recipient;
 String serialLine;
+String selectedConversation="new",aiPending,aiTransport;
 bool serialOverflow=false;
 std::vector<deck::CarrierNetwork> carriers;
 bool carrierScanning=false,wifiNeedsPassword=false,bleTask=false,bleActive=false,bleScanning=false;
@@ -49,21 +57,22 @@ bool pairActive=false,forgetAllBonds=false;
 BleEventKind pairMode=BleEventKind::PairConfirm;
 uint16_t pairHandle=0;uint32_t pairPin=0,pairAt=0,bleStatusAt=0;
 void key(char c);
+unsigned threadLineCount();
+void touchAt(int x,int y);
 
 
 const char* pageName() {
     switch(page) {
     case Page::Home:return "Home"; case Page::Messages:return "Messages";
-    case Page::SmsNumber:return "SMS number"; case Page::SmsText:return "SMS text";
+    case Page::SmsNumber:return "New SMS"; case Page::SmsThread:return "SMS conversation";
     case Page::Phone:return "Phone"; case Page::Radio:return "Radio";
-    case Page::RadioText:return "Radio text"; case Page::Diagnostics:return "Device status";
-    case Page::Detail:return "Message detail"; case Page::Settings:return "Settings";
+    case Page::Diagnostics:return "Device status";case Page::Settings:return "Settings";
     case Page::Apn:return "APN editor";
     case Page::Carriers:return "Carrier scan";case Page::Wifi:return "Wi-Fi";
     case Page::WifiSsid:return "Wi-Fi SSID";case Page::WifiPassword:return "Wi-Fi password";
     case Page::WifiForget:return "Forget Wi-Fi";case Page::Ble:return "Bluetooth LE";
     case Page::BlePair:return "BLE pairing";case Page::BleForget:return "Forget BLE";
-    case Page::Ai:return "AI chat";case Page::AiCompose:return "AI message";
+    case Page::Ai:return "AI conversation";case Page::AiModelPicker:return "Choose AI model";
     case Page::AiSetup:return "AI setup";case Page::AiEndpoint:return "AI endpoint";
     case Page::AiModel:return "AI model";case Page::AiKey:return "AI API key";
     }
@@ -107,18 +116,43 @@ void printSettings() {
         value.keyboardLight?"on":"off");
 }
 void openSettings() {page=Page::Settings;input="";changed();printSettings();}
-void openAi(){page=Page::Ai;input="";changed();}
-void openAiSetup(){page=Page::AiSetup;input="";changed();}
+bool inConversation(){return page==Page::SmsThread || page==Page::Radio || page==Page::Ai;}
+void openMessages(){page=Page::Messages;input="";threadScroll=0;changed();}
+void openAi(Page back=Page::Home){threadReturn=back;page=Page::Ai;input="";threadScroll=0;changed();}
+void openRadio(Page back=Page::Home){threadReturn=back;page=Page::Radio;input="";threadScroll=0;changed();}
+void openSms(const String& peer){threadReturn=Page::Messages;recipient=peer;page=Page::SmsThread;input="";threadScroll=0;changed();}
+void openAiSetup(Page back=Page::Home){aiSetupReturn=back;page=Page::AiSetup;input="";changed();}
+String aiConnectionText() {
+    String connection=ai.busy && aiTransport.length()?String("AI over ")+aiTransport:wifi.connected?String("Wi-Fi connected"):cellTcpReady()?String("LTE ready"):String("No data connection");
+    return connection+(aiSettings.values().key[0]?" / key saved":" / no key");
+}
+String aiStartHint() {
+    const auto& value=aiSettings.values();
+    if(!value.model[0])return "Choose a model in AI settings.";
+    const auto url=deck::aiCompletionUrl(value.endpoint);
+    const bool openAi=url.rfind("https://api.openai.com/",0)==0 || url.rfind("https://api.openai.com:443/",0)==0;
+    if(openAi && !value.key[0])return "Add your API key in AI settings.";
+    if(!wifi.connected && !cellTcpReady())return "Connect Wi-Fi or check cellular service to chat.";
+    return "Ready. Type a message below.";
+}
+String aiScreenStatus() {
+    return ai.status=="Set endpoint, model and key in Settings > I"?aiStartHint():ai.status;
+}
 bool configureAi(AiSettings::Field field,const String& value,const char* marker) {
     if(field==AiSettings::Field::Key)keyboard.trace=false;
     if(ai.busy){inform("AI setup busy; wait for the request");return false;}
     if(!aiSettings.set(field,value.c_str())){inform("AI setup not saved; check the field or storage");return false;}
-    ai.clear();aiOffset=0;openAiSetup();inform(marker);return true;
+    ai.clear();threadScroll=0;openAiSetup(aiSetupReturn);inform(marker);return true;
 }
 void saveAiField() {
     const auto field=page==Page::AiEndpoint?AiSettings::Field::Endpoint:page==Page::AiModel?AiSettings::Field::Model:AiSettings::Field::Key;
     const char* marker=field==AiSettings::Field::Endpoint?"AI endpoint saved":field==AiSettings::Field::Model?"AI model saved":"AI key saved";
     configureAi(field,input,marker);
+}
+void openAiModelPicker() {
+    modelCursor=deck::AiModelPresetCount;
+    for(size_t n=0;n<deck::AiModelPresetCount;++n)if(!std::strcmp(aiSettings.values().model,deck::AiModelPresets[n].id)){modelCursor=n;break;}
+    page=Page::AiModelPicker;input="";changed();
 }
 bool saveWireless(const WirelessOptions& value) {
     if(!settings.saveWireless(value)){inform("Wireless settings could not be saved");return false;}
@@ -254,7 +288,7 @@ void radioSend(const String& body) {
     if (!radio.send(body.c_str(),id)) {store.update(id,Delivery::Failed); inform("Radio unavailable or transmitting");}
     else inform("Radio transmitting...");
 }
-void home() {page=Page::Home; input=""; inboxOffset=0; changed();}
+void home() {page=Page::Home;input="";threadScroll=0;changed();}
 void cellPoll() {
     if (!cellTask) return;
     CellEvent e{};
@@ -295,6 +329,7 @@ void printInbox() {
 }
 void printStatus() {
     Serial.printf("Page: %s | Keyboard: %s\n",pageName(),keyboard.ready?"ready":"unavailable");
+    Serial.printf("Touch: %s / %s\n",touch.ready?"ready":"unavailable",touch.model());
     Serial.printf("Board: v1.%d | Battery: %d%% | Modem: %s | SIM: %s\n",board::revision11?1:0,battery,linked?"AT ready":"no response",sim.c_str());
     Serial.printf("LTE: %s | RSSI: %d (0=unknown) | SMS setup: %s\n",networkName(),signalDbm,smsConfigured?"ready":"unavailable");
     Serial.printf("Operator: %s\nCPSI: %s\nLoRa: %s %.1f MHz, node %08lX, error %d\n",operatorName.c_str(),systemInfo.c_str(),
@@ -323,10 +358,12 @@ void command(String line) {
     if(line=="help") help();
     else if(line=="status") printStatus();
     else if(line=="home") home();
+    else if(line=="messages")openMessages();
+    else if(line=="lora")openRadio();
     else if(line=="settings") openSettings();
     else if(line=="ai")openAi();
     else if(line=="ai setup" || line=="ai settings")openAiSetup();
-    else if(line=="ai clear"){ai.clear();aiOffset=0;changed();}
+    else if(line=="ai clear"){ai.clear();threadScroll=0;changed();}
     else if(line.startsWith("ai endpoint "))configureAi(AiSettings::Field::Endpoint,line.substring(12),"AI endpoint saved");
     else if(line.startsWith("ai model "))configureAi(AiSettings::Field::Model,line.substring(9),"AI model saved");
     else if(line.startsWith("ai key "))configureAi(AiSettings::Field::Key,line.substring(7),"AI key saved");
@@ -388,22 +425,64 @@ void serialPoll() {
         else serialOverflow=true;
     }
 }
-std::vector<const Message*> visibleMessages(Medium medium) {
-    std::vector<const Message*> rows;
-    for(auto i=store.messages().rbegin();i!=store.messages().rend();++i) if(i->medium==medium) rows.push_back(&*i);
+enum class ConversationType {NewSms,Ai,Radio,Sms};
+struct ConversationRow {ConversationType type;String key,title,preview,peer;};
+std::vector<ConversationRow> conversationRows() {
+    std::vector<deck::ConversationMessage> messages;
+    for(const auto& m:store.messages())messages.push_back({m.medium==Medium::Radio,m.sequence,m.peer,m.text});
+    const auto indexed=deck::conversationIndex(messages);
+    String aiPreview=ai.busy?"Thinking...":ai.messages().empty()?String(aiSettings.values().model):String(ai.messages().back().text.c_str());
+    std::vector<ConversationRow> rows={{ConversationType::NewSms,"new","New message","Send an SMS to a phone number",""},
+        {ConversationType::Ai,"ai","AI Assistant",aiPreview,""},
+        {ConversationType::Radio,"lora:broadcast","Nearby LoRa","Shared nearby broadcast conversation",""}};
+    for(const auto& row:indexed) {
+        if(row.kind==deck::ConversationKind::NearbyLoRa)rows[2].preview=row.preview.c_str();
+        else rows.push_back({ConversationType::Sms,row.key.c_str(),row.replyAddress.c_str(),row.preview.c_str(),row.replyAddress.c_str()});
+    }
     return rows;
+}
+void syncConversation(const std::vector<ConversationRow>& rows) {
+    for(unsigned n=0;n<rows.size();++n)if(rows[n].key==selectedConversation){conversationCursor=n;return;}
+    conversationCursor=0;selectedConversation=rows[0].key;
+}
+void chooseConversation() {
+    const auto rows=conversationRows();syncConversation(rows);const auto& row=rows[conversationCursor];
+    if(row.type==ConversationType::NewSms){page=Page::SmsNumber;input="";changed();}
+    else if(row.type==ConversationType::Ai)openAi(Page::Messages);
+    else if(row.type==ConversationType::Radio)openRadio(Page::Messages);
+    else openSms(row.peer);
+}
+void sendConversation() {
+    if(input.isEmpty())return;
+    if(page==Page::Ai) {
+        if(!ai.send(aiSettings.values(),input)){changed();return;}
+        aiPending=input;aiTransport=ai.status.indexOf("LTE")>=0?"LTE":"Wi-Fi";
+    } else if(page==Page::SmsThread) {
+        deck::SmsSubmit checked;
+        if(!deck::encodeSms(recipient.c_str(),input.c_str(),checked)){inform("This message exceeds one GSM-7 SMS");return;}
+        smsSend(recipient,input);
+    } else radioSend(input);
+    input="";threadScroll=0;changed();
 }
 void key(char c) {
     if(!c) return;
-    if(c==27){cancelPair();home();return;}
+    if(c==27){
+        cancelPair();
+        if(inConversation()){if(threadReturn==Page::Messages)openMessages();else home();}
+        else if(page==Page::SmsNumber)openMessages();
+        else if(page==Page::AiModelPicker || page==Page::AiEndpoint || page==Page::AiModel || page==Page::AiKey)openAiSetup(aiSetupReturn);
+        else if(page==Page::AiSetup){if(aiSetupReturn==Page::Ai)openAi(threadReturn);else if(aiSetupReturn==Page::Settings)openSettings();else home();}
+        else home();
+        return;
+    }
     if(page==Page::Home) {
-        if(c=='m') page=Page::Messages;
+        if(c=='m') {openMessages();return;}
         if(c=='p') page=Page::Phone;
-        if(c=='l') page=Page::Radio;
+        if(c=='l') {openRadio();return;}
         if(c=='d') page=Page::Diagnostics;
         if(c=='s') {openSettings();return;}
         if(c=='a') {openAi();return;}
-        input=""; inboxOffset=0; changed(); return;
+        input="";changed();return;
     }
     if(page==Page::Settings) {
         const auto& value=settings.values();
@@ -415,35 +494,50 @@ void key(char c) {
         else if(c=='c')carrierScan();
         else if(c=='w')openWifi();
         else if(c=='b')openBle();
-        else if(c=='i')openAiSetup();
+        else if(c=='i')openAiSetup(Page::Settings);
         else if(c=='d') {page=Page::Diagnostics;changed();}
         else if(c=='r') {action(CellActionKind::Refresh);inform("Refreshing modem status");}
         return;
     }
-    if(page==Page::Ai) {
-        auto lines=deck::aiDisplayLines(ai.messages());
-        if(c=='n'){if(ai.busy){inform("Wait for the current AI request");return;}input="";page=Page::AiCompose;changed();}
-        else if(c=='i')openAiSetup();
-        else if(c=='c'){ai.clear();aiOffset=0;changed();}
-        else if(c=='j' && aiOffset+16<lines.size()){aiOffset+=16;changed();}
-        else if(c=='k' && aiOffset>=16){aiOffset-=16;changed();}
+    if(page==Page::Messages) {
+        const auto rows=conversationRows();syncConversation(rows);
+        if((c=='j' || c==18) && conversationCursor+1<rows.size())++conversationCursor;
+        else if((c=='k' || c==17) && conversationCursor)--conversationCursor;
+        else if(c=='\r' || c=='\n'){chooseConversation();return;}
+        selectedConversation=rows[conversationCursor].key;changed();return;
+    }
+    if(inConversation()) {
+        if(c==17){const unsigned count=threadLineCount();const unsigned max=count>ThreadRows?count-ThreadRows:0;threadScroll=std::min(threadScroll+ThreadRows,max);changed();}
+        else if(c==18){threadScroll=threadScroll>ThreadRows?threadScroll-ThreadRows:0;changed();}
+        else if(c=='\r' || c=='\n')sendConversation();
+        else if(c=='\b'){if(input.length())input.remove(input.length()-1);changed();}
+        else if(c>=32 && c<=126 && input.length()<(page==Page::Ai?deck::AiPromptLimit:160)){input+=c;threadScroll=0;changed();}
         return;
     }
     if(page==Page::AiSetup) {
         const auto& value=aiSettings.values();
         if(c=='e'){input=value.endpoint;page=Page::AiEndpoint;changed();}
-        else if(c=='m'){input=value.model;page=Page::AiModel;changed();}
+        else if(c=='m')openAiModelPicker();
         else if(c=='k'){input="";keyboard.trace=false;page=Page::AiKey;changed();}
         else if(c=='x')configureAi(AiSettings::Field::Key,"","AI key removed");
-        else if(c=='a')openAi();
+        else if(c=='c'){if(ai.clear()){threadScroll=0;inform("Conversation cleared");}else inform(ai.status);}
+        else if(c=='a')openAi(aiSetupReturn==Page::Ai?threadReturn:Page::Home);
         return;
     }
-    if(page==Page::AiCompose || page==Page::AiEndpoint || page==Page::AiModel || page==Page::AiKey) {
-        const size_t limit=page==Page::AiCompose?deck::AiPromptLimit:page==Page::AiEndpoint?191:page==Page::AiModel?95:255;
+    if(page==Page::AiModelPicker) {
+        if((c=='j' || c==18) && modelCursor<deck::AiModelPresetCount){++modelCursor;changed();}
+        else if((c=='k' || c==17) && modelCursor){--modelCursor;changed();}
+        else if(c=='\r' || c=='\n') {
+            if(modelCursor==deck::AiModelPresetCount){input=aiSettings.values().model;page=Page::AiModel;changed();}
+            else configureAi(AiSettings::Field::Model,deck::AiModelPresets[modelCursor].id,"AI model saved");
+        }
+        return;
+    }
+    if(page==Page::AiEndpoint || page==Page::AiModel || page==Page::AiKey) {
+        const size_t limit=page==Page::AiEndpoint?191:page==Page::AiModel?95:255;
         if(c=='\b'){if(input.length())input.remove(input.length()-1);changed();}
         else if(c=='\r' || c=='\n') {
-            if(page==Page::AiCompose){if(ai.send(aiSettings.values(),input)){input="";page=Page::Ai;aiOffset=unsigned(deck::aiLastPageOffset(deck::aiDisplayLines(ai.messages())));}changed();}
-            else saveAiField();
+            saveAiField();
         } else if(c>=32 && c<=126 && input.length()<limit){input+=c;changed();}
         return;
     }
@@ -510,17 +604,6 @@ void key(char c) {
         return;
     }
     if(page==Page::Diagnostics) {if(c=='r') action(CellActionKind::Refresh); if(c=='i') action(CellActionKind::ReadInbox); return;}
-    if(page==Page::Detail) {page=detailReturn;changed();return;}
-    if(page==Page::Messages || page==Page::Radio) {
-        if(c=='n') {input="";page=page==Page::Messages?Page::SmsNumber:Page::RadioText;changed();return;}
-        auto rows=visibleMessages(page==Page::Messages?Medium::Sms:Medium::Radio);
-        if(c=='j' && inboxOffset+4<rows.size()){inboxOffset+=4;changed();}
-        if(c=='k' && inboxOffset>=4){inboxOffset-=4;changed();}
-        if(c>='1' && c<='4' && inboxOffset+size_t(c-'1')<rows.size()) {
-            detailId=rows[inboxOffset+c-'1']->sequence; detailReturn=page; page=Page::Detail; changed();
-        }
-        return;
-    }
     if(page==Page::Phone && (callState>=0 || input.isEmpty())) {
         if(c=='a' && callState>=0){action(CellActionKind::Answer);return;}
         if(c=='h' && callState>=0){action(CellActionKind::Hangup);return;}
@@ -528,14 +611,8 @@ void key(char c) {
     if(c=='\b') {if(input.length())input.remove(input.length()-1);changed();return;}
     if(c=='\r' || c=='\n') {
         if(page==Page::SmsNumber) {
-            if(deck::phoneNumber(input.c_str())) {recipient=input;input="";page=Page::SmsText;changed();}
+            if(deck::phoneNumber(input.c_str())) {String peer=input;openSms(peer);}
             else inform("Use digits and optional leading +");
-        } else if(page==Page::SmsText) {
-            deck::SmsSubmit checked;
-            if(deck::encodeSms(recipient.c_str(),input.c_str(),checked)){smsSend(recipient,input);page=Page::Messages;input="";inboxOffset=0;}
-            else inform("Use one GSM-7 SMS (160 septets)");
-        } else if(page==Page::RadioText) {
-            if(input.length()){radioSend(input);page=Page::Radio;input="";inboxOffset=0;}
         } else if(page==Page::Phone) {
             if(deck::phoneNumber(input.c_str())) {caller=input;action(CellActionKind::Dial,0,input);input="";}
             else inform("Use digits and optional leading +");
@@ -582,18 +659,119 @@ void card(int x,int y,const char* shortcut,const char* title,const char* subtitl
     s.drawRoundRect(x,y,106,75,6,GxEPD_BLACK);
     text(x+9,y+8,shortcut,2); text(x+9,y+34,title); text(x+9,y+51,subtitle);
 }
-void list(Medium medium) {
-    text(10,43,medium==Medium::Sms?"MESSAGES":"LORA / 915 MHz",2);
-    auto rows=visibleMessages(medium);
-    if(rows.empty()) {text(10,84,"No messages yet."); text(10,102,"N  Write a message");}
-    for(unsigned n=0;n<4 && inboxOffset+n<rows.size();++n) {
-        const auto& m=*rows[inboxOffset+n]; int y=77+n*42;
-        text(10,y,String(n+1)+" "+(m.incoming?"< ":"> ")+clipped(m.peer,25));
-        text(22,y+12,clipped(m.text,33));
-        text(22,y+24,deliveryName(m.delivery,m.medium));
-        board::screen->drawFastHLine(10,y+36,220,GxEPD_BLACK);
+std::vector<String> chatWrap(const String& value,unsigned columns=30) {
+    String clean;
+    for(unsigned n=0;n<value.length();++n){const unsigned char c=value[n];if(c=='\n' || (c>=32 && c<127))clean+=char(c);else if(c>=0xc0)clean+='?';else if(c<32 && c!='\r')clean+=' ';}
+    std::vector<String> lines;unsigned at=0;
+    while(at<clean.length()) {
+        unsigned end=std::min(at+columns,clean.length());const int newline=clean.indexOf('\n',at);
+        if(newline>=0 && unsigned(newline)<end)end=unsigned(newline);
+        else if(end<clean.length()){const int space=clean.lastIndexOf(' ',end);if(space>=0 && unsigned(space)>at+columns/2)end=unsigned(space);}
+        lines.push_back(clean.substring(at,end));at=end;
+        if(at<clean.length() && (clean[at]=='\n' || clean[at]==' '))++at;
     }
-    text(10,251,"N New  J/K Page  Alt+1..4 Read");
+    if(lines.empty())lines.emplace_back();
+    return lines;
+}
+struct ChatLine {String value;unsigned group;bool outgoing;bool gap=false;};
+void appendBubble(std::vector<ChatLine>& lines,const String& sender,const String& body,bool outgoing,unsigned group) {
+    lines.push_back({clipped(sender,30),group,outgoing});
+    for(const auto& line:chatWrap(body))lines.push_back({line,group,outgoing});
+    lines.push_back({"",group,outgoing,true});
+}
+std::vector<ChatLine> threadLines() {
+    std::vector<ChatLine> lines;unsigned group=0;
+    if(page==Page::Ai) {
+        for(const auto& m:ai.messages())appendBubble(lines,m.assistant?"AI Assistant":"You",m.text.c_str(),!m.assistant,group++);
+        if(ai.busy && aiPending.length())appendBubble(lines,"You / sending",aiPending,true,group++);
+    } else {
+        deck::Conversation conversation;
+        conversation.kind=page==Page::Radio?deck::ConversationKind::NearbyLoRa:deck::ConversationKind::Sms;
+        conversation.key=page==Page::Radio?"lora:broadcast":deck::conversationPeerKey(recipient.c_str());
+        std::vector<const Message*> messages;
+        for(const auto& m:store.messages())if(deck::conversationMatches(conversation,{m.medium==Medium::Radio,m.sequence,m.peer,m.text}))messages.push_back(&m);
+        std::sort(messages.begin(),messages.end(),[](const Message* a,const Message* b){return a->sequence<b->sequence;});
+        for(const auto* m:messages)appendBubble(lines,m->incoming?(page==Page::Radio?String(m->peer):String("SMS")):String("You / ")+deliveryName(m->delivery,m->medium),m->text,!m->incoming,group++);
+    }
+    while(!lines.empty() && lines.back().gap)lines.pop_back();
+    return lines;
+}
+unsigned threadLineCount(){return threadLines().size();}
+void conversationsView() {
+    auto& s=*board::screen;const auto rows=conversationRows();syncConversation(rows);
+    text(10,44,"<",2);text(38,44,"Messages",2);text(10,69,"Your conversations");text(160,69,"J/K or tap");
+    const unsigned offset=(conversationCursor/4)*4;
+    for(unsigned n=0;n<4 && offset+n<rows.size();++n) {
+        const auto& row=rows[offset+n];const int y=84+int(n)*41;
+        if(offset+n==conversationCursor)s.drawRoundRect(10,y,220,39,5,GxEPD_BLACK);
+        text(19,y+6,clipped(row.title,33));wrap(row.preview,19,y+22,33,1);
+    }
+    s.drawRoundRect(10,250,106,18,3,GxEPD_BLACK);text(38,255,"Previous");
+    s.drawRoundRect(124,250,106,18,3,GxEPD_BLACK);text(165,255,"Next");
+}
+void threadView() {
+    auto& s=*board::screen;
+    text(10,44,"<",2);text(38,44,page==Page::Ai?"AI Assistant":page==Page::Radio?"Nearby LoRa":clipped(recipient,16),2);
+    if(page==Page::Ai){s.drawRoundRect(203,40,27,23,4,GxEPD_BLACK);text(208,48,"...");}
+    text(10,69,clipped(page==Page::Ai?aiConnectionText():page==Page::Radio?String("Nearby group / broadcasts"):String("SMS / ")+networkName(),36));
+    const auto lines=threadLines();const unsigned maxScroll=lines.size()>ThreadRows?lines.size()-ThreadRows:0;
+    threadScroll=std::min(threadScroll,maxScroll);
+    const unsigned end=lines.size()-threadScroll,start=end>ThreadRows?end-ThreadRows:0;
+    if(lines.empty()) {
+        if(page==Page::Ai){wrap(ai.busy?String("Waiting for your provider..."):aiStartHint(),18,103,33,3);text(18,150,clipped(aiSettings.values().model,33));}
+        else if(page==Page::Radio)wrap("Messages are shared with nearby Handheld OS devices. This is a broadcast group, not a private chat.",18,102,33,6);
+        else wrap("Start your conversation below.",18,112,33,3);
+    }
+    for(unsigned n=start;n<end;) {
+        if(lines[n].gap){++n;continue;}
+        unsigned next=n+1;while(next<end && lines[next].group==lines[n].group && !lines[next].gap)++next;
+        const int x=lines[n].outgoing?30:10,y=80+int(n-start)*10,h=int(next-n)*10+4;
+        if(lines[n].outgoing)s.fillRoundRect(x,y,200,h,4,GxEPD_BLACK);else s.drawRoundRect(x,y,200,h,4,GxEPD_BLACK);
+        s.setTextColor(lines[n].outgoing?GxEPD_WHITE:GxEPD_BLACK);
+        for(unsigned row=n;row<next;++row)text(x+7,83+int(row-start)*10,lines[row].value);
+        s.setTextColor(GxEPD_BLACK);n=next;
+    }
+    s.drawRoundRect(10,190,75,17,3,GxEPD_BLACK);text(28,195,"Older");
+    s.drawRoundRect(95,190,75,17,3,GxEPD_BLACK);text(113,195,"Newer");
+    s.drawRoundRect(10,214,220,54,5,GxEPD_BLACK);s.drawRoundRect(193,219,31,43,4,GxEPD_BLACK);text(197,237,"Send");
+    String draft=input.isEmpty()?String("Message..."):input+"_";
+    if(draft.length()>84)draft="<"+draft.substring(draft.length()-83);
+    wrap(draft,18,225,28,3);
+}
+void touchAt(int x,int y) {
+    // E-paper can lag the selected page/draft. Ignore touches until the newest
+    // screen is visible so an old row cannot become a Send button underneath.
+    if(dirty || !board::screen)return;
+    if(y>=303){key(27);return;}
+    if((page==Page::Messages || inConversation() || page==Page::AiSetup || page==Page::AiModelPicker) && x<36 && y>=36 && y<=65){key(27);return;}
+    if(page==Page::Home) {
+        if(y>=80 && y<=155){if(x>=10 && x<=116)key('m');else if(x>=124 && x<=230)key('p');}
+        else if(y>=165 && y<=240){if(x>=10 && x<=116)key('l');else if(x>=124 && x<=230)key('d');}
+        else if(y>=247 && y<=268){if(x>=10 && x<=116)key('a');else if(x>=124 && x<=230)key('s');}
+    } else if(page==Page::Messages && x>=10 && x<=230 && y>=250 && y<=268) {
+        const auto rows=conversationRows();syncConversation(rows);
+        conversationCursor=x<=116?(conversationCursor>=4?conversationCursor-4:0):std::min(conversationCursor+4,unsigned(rows.size()-1));
+        selectedConversation=rows[conversationCursor].key;changed();
+    } else if(page==Page::Messages && x>=10 && x<=230 && y>=84 && y<248) {
+        const unsigned row=(y-84)/41;const auto rows=conversationRows();syncConversation(rows);
+        const unsigned selected=(conversationCursor/4)*4+row;
+        if((y-84)%41<39 && selected<rows.size()){conversationCursor=selected;selectedConversation=rows[selected].key;chooseConversation();}
+    } else if(inConversation()) {
+        if(y>=190 && y<=207){if(x>=10 && x<=85)key(17);else if(x>=95 && x<=170)key(18);}
+        else if(x>=193 && x<=224 && y>=219 && y<=262 && input.length())key('\r');
+        else if(page==Page::Ai && x>=203 && x<=230 && y>=40 && y<=63)openAiSetup(Page::Ai);
+    } else if(page==Page::SmsNumber && x>=10 && x<=230 && y>=211 && y<=243)key('\r');
+    else if(page==Page::Settings && x>=10 && x<=230) {
+        if(y>=66 && y<90)key('a');else if(y>=90 && y<112)key('c');
+        else if(y>=112 && y<136)key('w');else if(y>=136 && y<159)key('b');
+        else if(y>=159 && y<182)key('i');else if(y>=182 && y<203)key('f');
+        else if(y>=203 && y<223)key('k');else if(y>=223 && y<241)key('d');else if(y>=241 && y<=263)key('r');
+    } else if(page==Page::AiSetup && x>=10 && x<=230) {
+        if(y>=72 && y<125)key('e');else if(y>=125 && y<169)key('m');else if(y>=169 && y<190)key('k');
+        else if(y>=190 && y<210)key('x');else if(y>=210 && y<230)key('c');else if(y>=230 && y<252)key('a');
+    } else if(page==Page::AiModelPicker && x>=10 && x<=230 && y>=77 && y<=255) {
+        const unsigned row=(y-77)/36;if(row<=deck::AiModelPresetCount && (y-77)%36<34){modelCursor=row;key('\r');}
+    } else if((page==Page::AiEndpoint || page==Page::AiModel || page==Page::AiKey) && y>=205 && y<=229)key('\r');
 }
 void draw() {
     if(!board::screen || !dirty) return;
@@ -605,11 +783,18 @@ void draw() {
     s.firstPage();
     do {
         s.fillScreen(GxEPD_WHITE);
-        text(10,8,"HANDHELD OS",2);
+        text(10,13,"HANDHELD OS");
+        const auto wireless=deck::wifiIndicator(wifi.enabled,wifi.connected,wifi.connecting,wifi.rssi);
+        text(83,13,wireless.label);
+        for(unsigned bar=0;bar<3;++bar) {
+            const int h=3+int(bar)*3,x=112+int(bar)*4;
+            if(bar<wireless.bars)s.fillRect(x,23-h,3,h,GxEPD_BLACK);
+            else s.drawRect(x,23-h,3,h,GxEPD_BLACK);
+        }
         const auto cell=deck::cellularIndicator(linked,simReady,network,signalDbm,operatorName.c_str(),systemInfo.c_str());
-        text(146,13,cell.label);
+        text(133,13,cell.label);
         for(unsigned bar=0;bar<4;++bar) {
-            int h=3+int(bar)*3,x=170+int(bar)*4;
+            int h=3+int(bar)*3,x=157+int(bar)*4;
             if(bar<cell.bars)s.fillRect(x,23-h,3,h,GxEPD_BLACK);
             else s.drawRect(x,23-h,3,h,GxEPD_BLACK);
         }
@@ -619,25 +804,20 @@ void draw() {
         if(page==Page::Home) {
             text(10,42,networkName());
             text(10,57,radio.ready?"915 MHz radio ready":"Radio unavailable");
-            card(10,80,"M","Messages","SMS inbox");
+            card(10,80,"M","Messages","Conversations");
             card(124,80,"P","Phone","Call controls");
             card(10,165,"L","Radio","LoRa chat");
             card(124,165,"D","Status","SIM + network");
             s.drawRoundRect(10,247,106,21,4,GxEPD_BLACK);text(19,254,"A  AI chat");
             s.drawRoundRect(124,247,106,21,4,GxEPD_BLACK);text(133,254,"S  Settings");
-        } else if(page==Page::Messages) list(Medium::Sms);
-        else if(page==Page::Radio) list(Medium::Radio);
+        } else if(page==Page::Messages) conversationsView();
+        else if(inConversation())threadView();
         else if(page==Page::SmsNumber) {
             text(10,44,"NEW MESSAGE",2); text(10,78,"To: phone number");
             wrap(input+"_",10,104,18,2,2);
             text(10,170,"W/E/R=1/2/3  S/D/F=4/5/6");
             text(10,185,"Z/X/C=7/8/9  P=0  O=+");
-            text(10,220,"Enter: write message");
-        } else if(page==Page::SmsText || page==Page::RadioText) {
-            text(10,44,page==Page::SmsText?"WRITE SMS":"LORA BROADCAST",2);
-            text(10,75,page==Page::SmsText?clipped(recipient,32):"Plaintext / no delivery receipt");
-            wrap(input+"_",10,100,35,13);
-            text(10,242,String(input.length())+" chars  Enter: send");
+            s.drawRoundRect(10,211,220,32,5,GxEPD_BLACK);text(75,223,"Continue");
         } else if(page==Page::Phone) {
             text(10,44,"PHONE",2); wrap(call,10,78,35,3);
             text(10,114,clipped(caller,34));
@@ -734,27 +914,21 @@ void draw() {
                 text(10,169,"Then press Enter on that device");
             } else {text(10,83,"Enter the other device's 6-digit code");text(10,117,input+"_",3);text(10,169,"Enter: submit passkey");text(10,190,"W/E/R 1/2/3 | S/D/F 4/5/6");text(10,205,"Z/X/C 7/8/9 | P 0");}
             text(10,241,"Sym cancels. Expires in 60 seconds.");
-        } else if(page==Page::Ai) {
-            text(10,44,"AI CHAT",2);
-            const auto lines=deck::aiDisplayLines(ai.messages());
-            if(lines.empty()) {
-                wrap("N writes a message. Configure your own provider in I Setup. Chat uses Wi-Fi and sends only this conversation to your selected endpoint.",10,83,35,7);
-                text(10,181,"Replies may be inaccurate.");
-            } else {
-                for(unsigned n=0;n<16 && aiOffset+n<lines.size();++n)text(10,78+n*10,lines[aiOffset+n].c_str());
-                text(10,240,String("Page ")+String(aiOffset/16+1)+" / "+String((lines.size()+15)/16));
-            }
-            text(10,256,"N New  J/K Read  I Setup  C Clear");
-        } else if(page==Page::AiCompose) {
-            text(10,44,"ASK AI",2);text(10,75,"Wi-Fi / your configured provider");
-            wrap(input+"_",10,99,35,13);text(10,245,String(input.length())+"/384  Enter: send to provider");
         } else if(page==Page::AiSetup) {
-            const auto& value=aiSettings.values();text(10,44,"AI SETUP",2);
+            const auto& value=aiSettings.values();text(10,44,"<",2);text(38,44,"AI SETUP",2);
             text(10,78,"E  HTTPS API base URL");wrap(value.endpoint,22,94,33,3);
             text(10,130,"M  Model");wrap(value.model[0]?value.model:"Choose your provider's model",22,146,33,2);
             text(10,176,String("K  API key: ")+(value.key[0]?"Saved (hidden)":"Not set"));
-            text(10,196,"X Remove saved API key");text(10,216,"A Open AI chat");
-            text(10,241,"Key stored on device, not encrypted");text(10,257,aiSettings.persistent?"Setup saved separately in NVS":"AI settings storage unavailable");
+            text(10,196,"X Remove saved API key");text(10,216,"C Clear this conversation");text(10,236,"A Open AI conversation");
+            text(10,257,aiSettings.persistent?"Key saved on device, not encrypted":"AI settings storage unavailable");
+        } else if(page==Page::AiModelPicker) {
+            text(10,44,"<",2);text(38,44,"Choose model",2);
+            for(unsigned n=0;n<=deck::AiModelPresetCount;++n) {
+                const int y=77+int(n)*36;
+                if(n==modelCursor)s.drawRoundRect(10,y,220,34,4,GxEPD_BLACK);
+                text(19,y+5,n<deck::AiModelPresetCount?deck::AiModelPresets[n].label:"Custom model");
+                text(19,y+19,n<deck::AiModelPresetCount?deck::AiModelPresets[n].id:"Enter a provider model ID");
+            }
         } else if(page==Page::AiEndpoint || page==Page::AiModel || page==Page::AiKey) {
             const bool secret=page==Page::AiKey;text(10,44,secret?"AI API KEY":page==Page::AiModel?"AI MODEL":"AI HTTPS ENDPOINT",2);
             String visible=input;if(secret){visible="";for(unsigned n=0;n<input.length();++n)visible+='*';}
@@ -762,19 +936,14 @@ void draw() {
             if(secret){text(10,235,"Enter a replacement key, never shown");text(10,250,"Blank Enter removes the saved key");}
             else if(page==Page::AiEndpoint){text(10,235,"API base, e.g. https://host/v1");text(10,250,"HTTPS only; redirects refused");}
             else text(10,242,"Use your provider's exact model ID");
-        } else if(page==Page::Detail) {
-            for(const auto& m:store.messages()) if(m.sequence==detailId) {
-                text(10,44,m.medium==Medium::Sms?"SMS":"LORA",2);
-                text(10,75,clipped(m.peer,35));
-                text(10,91,deliveryName(m.delivery,m.medium));
-                wrap(m.text,10,114,35,13);
-                text(10,251,"Any key: back to inbox");
-            }
         }
         s.drawFastHLine(10,273,220,GxEPD_BLACK);
-        wrap(page==Page::Ai || page==Page::AiCompose?ai.status:notice,10,282,36,2);
-        text(10,308,"Sym: Home   Handheld OS 0.1");
+        wrap(page==Page::Ai?aiScreenStatus():notice,10,282,36,2);
+        text(10,308,inConversation()?"Sym: Back    Enter: Send":"Sym: Back / Home");
     } while(s.nextPage());
+    // Consume a press that arrived while the blocking e-paper refresh was in
+    // flight. It began against the old image and must not activate a new Send.
+    int ignoredX=0,ignoredY=0;touch.poll(ignoredX,ignoredY);
     dirty=false; drawnAt=millis(); ++refreshes;
 }
 }
@@ -783,12 +952,14 @@ void setup() {
     board::begin();
     if(board::unsupported) {Serial.println("T-Deck Pro MAX detected; unsupported profile. Radios disabled.");return;}
     keyboard.begin();
+    touch.begin();
     store.begin();
     settings.begin();
     aiSettings.begin();ai.begin();
     board::lights(settings.values().frontLight,settings.values().keyboardLight);
     battery=board::batteryPercent();
     wifi.changed=[](const String& value){inform("Wi-Fi: "+value);};
+    wifi.signalChanged=[](){changed();};
     wifi.configure(settings.wireless());
     bleTask=startBleTask();
     if(bleTask && settings.wireless().bleEnabled) {
@@ -815,11 +986,12 @@ void setup() {
 void loop() {
     if(board::unsupported) {delay(100);return;}
     serialPoll(); cellPoll(); wifi.poll(); blePoll();
-    if(ai.poll()){aiOffset=unsigned(deck::aiLastPageOffset(deck::aiDisplayLines(ai.messages())));changed();}
+    if(ai.poll()){aiPending="";threadScroll=0;changed();}
     bool radioWasReady=radio.ready;
     radio.poll();
     if(radio.ready!=radioWasReady) inform(radio.ready?"LoRa receiver restored":"LoRa receive unavailable; retrying");
     for(unsigned i=0;i<16;++i){char c=keyboard.poll();if(!c)break;key(c);}
+    int touchX=0,touchY=0;if(touch.poll(touchX,touchY))touchAt(touchX,touchY);
     if(uint32_t(millis()-batteryAt)>=30000){batteryAt=millis();int value=board::batteryPercent();if(value!=battery){battery=value;changed();}}
     draw();
     delay(5);

@@ -1,4 +1,5 @@
 #include <ai_protocol.h>
+#include <ai_models.h>
 #include "ai_settings.h"
 #include <cassert>
 #include <cstring>
@@ -7,6 +8,9 @@
 namespace {
 std::string response(const std::string& content,const std::string& finish="stop") {
     return "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":"+content+"},\"finish_reason\":\""+finish+"\"}],\"unused\":{\"a\":[null,true,false,1,-2.5e+3]}}";
+}
+std::string repeated(const std::string& text,size_t count) {
+    std::string result;for(size_t n=0;n<count;++n)result+=text;return result;
 }
 }
 int main() {
@@ -20,9 +24,17 @@ int main() {
     assert(aiCompletionUrl("http://host").empty());
     std::string request;
     assert(aiRequest("provider/model",{{false,"Earlier"},{true,"Reply"}},"Hello \"API\"\n\\",request));
-    assert(request=="{\"model\":\"provider/model\",\"messages\":[{\"role\":\"user\",\"content\":\"Earlier\"},{\"role\":\"assistant\",\"content\":\"Reply\"},{\"role\":\"user\",\"content\":\"Hello \\\"API\\\"\\u000a\\\\\"}],\"stream\":false}");
-    assert(aiRequest("gpt-5.6-luna",{},"Hi",request,true) && request.find("\"max_completion_tokens\":1024")!=std::string::npos && request.find("\"reasoning_effort\":\"none\"")!=std::string::npos);
+    assert(request=="{\"model\":\"provider/model\",\"messages\":[{\"role\":\"system\",\"content\":\"You are answering on a small 240x320 e-paper handheld. Keep every reply within 500 Unicode characters total, including spaces and line breaks. Be concise. Use plain text; avoid tables and long lists.\"},{\"role\":\"user\",\"content\":\"Earlier\"},{\"role\":\"assistant\",\"content\":\"Reply\"},{\"role\":\"user\",\"content\":\"Hello \\\"API\\\"\\u000a\\\\\"}],\"stream\":false}");
+    assert(request.find("\"role\":\"system\"")<request.find("Earlier") && request.find("Earlier")<request.find("Reply") && request.find("Reply")<request.find("Hello"));
+    assert(aiRequest("gpt-5.6-luna",{},"Hi",request,true) && request.find("\"max_completion_tokens\":256")!=std::string::npos && request.find("\"reasoning_effort\":\"none\"")!=std::string::npos);
     assert(aiRequest("gpt-5.6-luna",{},"Hi",request) && request.find("max_completion_tokens")==std::string::npos);
+    assert(AiModelPresetCount==4);
+    for(const auto& preset:AiModelPresets) {
+        assert(boundedOpenAiModel(preset.id));
+        assert(aiRequest(preset.id,{},"Hi",request,true) && request.find("\"max_completion_tokens\":256")!=std::string::npos && request.find("\"reasoning_effort\":\"none\"")!=std::string::npos);
+        assert(aiRequest(preset.id,{},"Hi",request,false) && request.find("max_completion_tokens")==std::string::npos && request.find("reasoning_effort")==std::string::npos);
+    }
+    assert(!boundedOpenAiModel("gpt-5.6-luna-custom") && !boundedOpenAiModel("gpt-4.1"));
     assert(aiRequest("other-model",{},"Hi",request,true) && request.find("reasoning_effort")==std::string::npos);
     assert(!aiRequest("",{},"Hello",request) && request.empty());
     assert(!aiRequest("model",{}," \n",request));
@@ -34,8 +46,26 @@ int main() {
     auto reply=aiResponse(200,response("\"Hello\\nworld \\u00e9 \\ud83d\\ude03\""));
     assert(reply.ok && !reply.truncated && reply.text=="Hello\nworld \xc3\xa9 \xf0\x9f\x98\x83");
     assert(aiResponse(200,response("\"bounded\"","length")).truncated);
+    reply=aiResponse(200,response("\""+std::string(500,'x')+"\""));
+    assert(reply.ok && !reply.truncated && reply.text.size()==500);
+    reply=aiResponse(200,response("\""+std::string(501,'x')+"\""));
+    assert(reply.ok && reply.truncated && reply.text==std::string(500,'x'));
+    reply=aiResponse(200,response("\""+std::string(499,'x')+" y\""));
+    assert(reply.ok && reply.truncated && reply.text.size()==500 && reply.text.back()==' ');
+    reply=aiResponse(200,response("\""+std::string(499,'x')+"\\ny\""));
+    assert(reply.ok && reply.truncated && reply.text.size()==500 && reply.text.back()=='\n');
+    reply=aiResponse(200,response('"'+repeated("\xc3\xa9",500)+'"'));
+    assert(reply.ok && !reply.truncated && reply.text==repeated("\xc3\xa9",500));
+    reply=aiResponse(200,response('"'+repeated("\xe4\xb8\xad",501)+'"'));
+    assert(reply.ok && reply.truncated && reply.text==repeated("\xe4\xb8\xad",500));
+    reply=aiResponse(200,response('"'+repeated("\\ud83d\\ude03",500)+'"'));
+    assert(reply.ok && !reply.truncated && reply.text==repeated("\xf0\x9f\x98\x83",500) && reply.text.size()==2000);
+    reply=aiResponse(200,response('"'+repeated("\xf0\x9f\x98\x83",501)+'"'));
+    assert(reply.ok && reply.truncated && reply.text==repeated("\xf0\x9f\x98\x83",500) && reply.text.size()<=AiReplyLimit);
+    reply=aiResponse(200,response("\""+std::string(499,'x')+"\xf0\x9f\x98\x83\xc3\xa9\""));
+    assert(reply.ok && reply.truncated && reply.text==std::string(499,'x')+"\xf0\x9f\x98\x83");
     reply=aiResponse(200,response("\""+std::string(2047,'x')+"\xc3\xa9\""));
-    assert(reply.ok && reply.truncated && reply.text.size()==2047);
+    assert(reply.ok && reply.truncated && reply.text.size()==500 && reply.text.size()<=AiReplyLimit);
     for(const auto& body:{"", "{}", "[]", "{\"choices\":null}", "{\"choices\":{\"0\":{\"message\":{\"content\":\"wrong\"}}}}", "{\"choices/0/message/content\":\"wrong\"}", "{\"choices\":[{\"message\":{\"content\":null}}]}", "{\"choices\":[{\"message\":{\"content\":\"a\",\"content\":\"b\"}}]}", "{\"x\":01}"})assert(!aiResponse(200,body).ok);
     for(const auto& content:{"\"\\ud800\"","\"\\udc00\"","\"\\ud800\\u0041\"","\"\\u0000\"","\"\\q\"","\"unclosed","\"\xc0\xaf\""})assert(!aiResponse(200,response(content)).ok);
     assert(!aiResponse(200,std::string(AiBodyLimit+1,'x')).ok);

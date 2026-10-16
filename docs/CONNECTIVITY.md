@@ -24,6 +24,21 @@ request and is not included in boot diagnostics or companion status.
 `modem AT+CMGL=4` explicitly dumps raw SIM SMS PDUs over USB for codec diagnosis.
 It may mark messages as read but does not delete them; keep its output private.
 
+SMS setup prefers **`CPMS="SM","SM","ME"`**: the default reading store and
+stored-message sending store remain SIM (SM), while new received messages are
+stored in modem memory (ME). This avoids depending on free slots in a full SIM.
+If the modem rejects ME reception, setup falls back to SM/SM/SM and reports that
+fallback. Transient SIM-busy errors retry setup instead. A full receiving store
+reported by CPMS produces a warning; the firmware never deletes messages to make
+room. ME can eventually fill too.
+
+Supported incoming messages are imported from **both SM and ME** at startup,
+when Diagnostics I / USB `scan-sim` requests an inbox import, and after message
+notifications. The existing `scan-sim` command name is retained for compatibility.
+ME notifications schedule a bounded streaming scan; the read store is restored
+to SM before any SIM slot is read. Unsupported multipart/sender/encoding messages
+remain in their original store. Automatic scans do not print raw PDUs.
+
 `modem inbox-me` explicitly inspects the modem's **ME** message storage. It
 temporarily selects ME for CPMS **mem1** (the store used by CMGL/CMGR), streams
 the raw PDUs to USB, imports supported incoming messages and restores mem1 to
@@ -35,8 +50,11 @@ output can contain message contents and phone numbers; keep it private.
 SIM message notifications received during that inspection are deferred until
 SM is restored. If restoration fails, slot reads remain blocked while normal
 SMS setup repairs the storage selection; a timeout reconnects and reinitializes
-the modem. Use `modem AT+CPMS?` afterward to inspect the selected stores. ME
-inspection is an explicit diagnostic, not an automatic scan of every store.
+the modem. Failed UI delivery or temporary read errors leave a scan pending for
+a bounded retry; an outgoing SMS is never automatically resubmitted. Use
+`modem AT+CPMS?` afterward to inspect the selected stores. Normally mem1/mem2 are
+SM and mem3 is ME, or all three are SM after fallback. Only the explicit
+`modem inbox-me` diagnostic prints raw ME PDUs.
 
 After swapping a SIM, `modem restart` requests one software restart of the
 cellular module and reinitializes its SIM, SMS setup and saved APN. It refuses
@@ -59,6 +77,12 @@ signal leaves the bars empty. `...` means checking/searching, `SIM` means the
 SIM is not ready, `NO` means unregistered/denied, `SOS` means emergency-only,
 and `SMS` means SMS-only registration. Disconnected states never retain filled
 bars from an earlier connection. This indicator describes cellular service.
+
+Beside it, Wi-Fi has a separate **three-bar** indicator: `Woff` is disabled,
+`W--` is enabled/disconnected, `W...` is connecting and `WiFi` is connected.
+Known Wi-Fi RSSI below -75 dBm gives one bar, -75 through below -60 gives two,
+and -60 or stronger gives three. Unknown RSSI leaves the bars empty. A Wi-Fi
+association or an LTE registration label alone does not prove Internet access.
 
 ## Wi-Fi: Settings → W
 
@@ -85,6 +109,31 @@ set/get command and are never exposed through the BLE companion service.
 
 USB: `wifi`, `wifi on`, `wifi off`, `wifi scan`, `wifi networks`, `wifi forget`.
 `status` reports connection state and IP, not the password.
+
+## AI data connection
+
+The unified Messages list includes one **AI Assistant** thread. Type directly
+into its composer and press Enter or tap Send. It uses connected Wi-Fi first;
+when Wi-Fi is disconnected, it uses the modem's ready LTE data path. Turn Wi-Fi
+off with Settings W or USB `wifi off` to force an LTE test. A request uses its
+selected transport once; a failure is not silently retried on the other path.
+
+The thread displays connection/key readiness and the active request transport.
+An activated SIM, compatible cellular service, appropriate APN, working packet
+data and provider credentials are needed for LTE. Network registration and
+signal bars do not alone establish those requirements.
+
+Both paths use verified HTTPS. For LTE, ESP32 mbedTLS validates the certificate
+chain and hostname while a queued modem TCP transport carries encrypted bytes.
+The dedicated cellular task remains the only UART owner. Diagnostic/network
+changes that could disrupt an open AI connection are refused until it closes;
+SMS notifications are retained and modem commands remain serialized. Native
+modem HTTPS/TLS commands are unused. See [AI_CHAT.md](AI_CHAT.md) for provider
+setup, the four model presets plus Custom and the 500-character reply limit.
+
+The earlier Wi-Fi provider request passed on hardware. The new LTE data path,
+unified conversation/touch controls and final limit update still require the
+combined hardware pass; no LTE provider success is claimed here.
 
 ## Bluetooth LE: Settings → B
 

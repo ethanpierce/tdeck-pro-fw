@@ -1,6 +1,7 @@
 #include "modem_task.h"
 #include "board.h"
 #include "settings.h"
+#include "cellular_socket.h"
 #include <at_engine.h>
 #include <sms_pdu.h>
 #include <apn.h>
@@ -39,6 +40,10 @@ int number(const std::string& field, int low, int high) {
     long value=strtol(field.c_str(),&end,10);
     return end && !*end && value>=low && value<=high?int(value):-1;
 }
+bool transientSmsError(const std::string& text) {
+    return text.find("SIM busy")!=std::string::npos || text.find("SIM not ready")!=std::string::npos ||
+        text=="+CMS ERROR: 310" || text=="+CMS ERROR: 313" || text=="+CMS ERROR: 314";
+}
 std::string callerNumber(const std::vector<std::string>& fields, size_t index) {
     if (fields.size()<=index) return "";
     std::string peer=fields[index];
@@ -50,6 +55,7 @@ public:
     CellService(): engine_([](const std::string& data){Serial1.write(reinterpret_cast<const uint8_t*>(data.data()),data.size());},
         [this](const std::string& line){urc(line);}) {}
     void run() {
+        tcp_.begin();
         Serial1.setRxBufferSize(8192);
         Serial1.begin(DECK_MODEM_BAUD,SERIAL_8N1,board::ModemEspRx,board::ModemEspTx);
         board::startModemPower();
@@ -60,7 +66,8 @@ public:
             CellAction action{};
             if (xQueueReceive(cellActions,&action,0)==pdTRUE) handle(action);
             uint32_t now=millis();
-            if (engine_.idle()) {
+            tcp_.poll(engine_,linked_ && sim_ && registered() && !configuring_ && !smsConfiguring_ && !smsBusy_ && !scanning_ && !inCall_ && !apnPending_,now);
+            if (engine_.idle() && !tcp_.busy()) {
                 // Only enqueue a call when the UART is free. A queued hangup can
                 // then replace an unsent dial instead of running before it.
                 if (hasPendingCall_) performCall();
@@ -76,8 +83,7 @@ public:
                         callPollSoon_=false; lastCallPoll_=now; calls();
                     } else if (diagnosticStep_<diagnosticCount_) {
                         query(DiagnosticCommands[diagnosticStep_++]);
-                    } else if (smsReady() && scanRequired_ && !scanning_ &&
-                        (!scanAttempted_ || uint32_t(now-lastScan_)>=PollMs)) inbox();
+                    } else if (smsReady() && !scanning_ && scanInbox(now)) {}
                     else if (uint32_t(now-lastPoll_)>=PollMs) diagnostics(false);
                 }
             }
@@ -89,11 +95,12 @@ private:
     bool registered() const { return reg_==1 || reg_==5 || reg_==9 || reg_==10; }
     bool smsRegistered() const { return registered() || reg_==6 || reg_==7; }
     void offline(const std::string& reason) {
+        tcp_.cancel();
         ++generation_; ++simGeneration_;
         linked_=sim_=pdu_=storage_=notifications_=false;
         configuring_=smsConfiguring_=false;
-        smsSetupAttempted_=scanAttempted_=false;
-        scanRequired_=true; simStatus_.clear(); reg_=-1;
+        smsSetupAttempted_=scanAttempted_=meScanAttempted_=scanning_=false;
+        scanRequired_=meScanRequired_=meStorageAvailable_=true; simStatus_.clear(); reg_=-1;
         diagnosticStep_=diagnosticCount_=0;
         lastConnect_=millis();
         if (hasPendingCall_) {
@@ -141,7 +148,7 @@ private:
         });
     }
     void configureSms(unsigned step, uint32_t simGeneration) {
-        static const char* cmds[]={"AT+CMGF=0","AT+CPMS=\"SM\",\"SM\",\"SM\"","AT+CNMI=2,1,0,0,0"};
+        static const char* cmds[]={"AT+CMGF=0","AT+CPMS=\"SM\",\"SM\",\"ME\"","AT+CNMI=2,1,0,0,0"};
         if (step>=sizeof(cmds)/sizeof(cmds[0])) {
             smsConfiguring_=false;
             emit(CellEventKind::SmsReady,"",smsReady());
@@ -149,17 +156,38 @@ private:
         }
         send(cmds[step],[this,step,simGeneration](const deck::AtResult& r){
             if (!linked_ || !sim_ || simGeneration!=simGeneration_) return;
-            if (step==0) pdu_=r.ok;
-            if (step==1) storage_=r.ok;
-            if (step==2) notifications_=r.ok;
-            if (!r.ok) {
-                smsConfiguring_=false;
-                emit(CellEventKind::Trace,"SMS setup: "+r.final+"; retrying after SIM readiness");
-                emit(CellEventKind::SmsReady,"",0);
+            if(step==1 && !r.ok && !r.uncertain && !transientSmsError(r.final)) {
+                emit(CellEventKind::Trace,"ME receive storage unavailable; trying SIM storage without deleting messages");
+                send("AT+CPMS=\"SM\",\"SM\",\"SM\"",[this,simGeneration](const deck::AtResult& fallback){
+                    smsSetupResult(1,simGeneration,fallback,false);
+                });
                 return;
             }
-            configureSms(step+1,simGeneration);
+            smsSetupResult(step,simGeneration,r,true);
         });
+    }
+    void smsSetupResult(unsigned step, uint32_t simGeneration, const deck::AtResult& r, bool receiveMe) {
+        if(!linked_ || !sim_ || simGeneration!=simGeneration_) return;
+        if(step==0) pdu_=r.ok;
+        if(step==1) storage_=r.ok;
+        if(step==2) notifications_=r.ok;
+        if(!r.ok) {
+            smsConfiguring_=false;
+            emit(CellEventKind::Trace,"SMS setup: "+r.final+"; retrying after SIM readiness");
+            emit(CellEventKind::SmsReady,"",0);return;
+        }
+        if(step==1) {
+            if(receiveMe) meStorageAvailable_=true;
+            emit(CellEventKind::Trace,receiveMe?"Incoming SMS storage: modem (ME)":"Incoming SMS storage: SIM (SM) fallback");
+            for(const auto& line:r.lines) if(line.rfind("+CPMS:",0)==0) {
+                const auto f=deck::csv(valueAfterColon(line));
+                if(f.size()==6) {
+                    const int used=number(f[4],0,65535),total=number(f[5],1,65535);
+                    if(used>=total && total>0) emit(CellEventKind::Trace,"Incoming SMS storage is full; messages are preserved, but new delivery may be blocked");
+                }
+            }
+        }
+        configureSms(step+1,simGeneration);
     }
     void diagnostics(bool full) {
         if (!linked_) return;
@@ -172,7 +200,8 @@ private:
             sim_=ready;
             pdu_=storage_=notifications_=false;
             smsConfiguring_=smsSetupAttempted_=false;
-            scanRequired_=true; scanAttempted_=false;
+            scanRequired_=meScanRequired_=meStorageAvailable_=true;
+            scanAttempted_=meScanAttempted_=scanning_=false;
         }
         if (status!=simStatus_) {
             simStatus_=status;
@@ -210,18 +239,21 @@ private:
         }
     }
     void urc(const std::string& line) {
+        tcp_.onUrc(line);
         if (line=="RDY") offline("Modem restarted; reconnecting without retrying messages or calls");
         else if (line.rfind("+CPIN:",0)==0) simStatus(valueAfterColon(line));
         else if (line=="SMS DONE" || line=="SMS Ready") smsSetupAttempted_=false;
         else if (line.rfind("+CEREG:",0)==0) network(line);
         else if (line.rfind("+CMTI:",0)==0) {
             auto f=deck::csv(valueAfterColon(line));
-            if (f.size()==2 && f[0]=="SM") {
+            if (f.size()==2 && (f[0]=="SM" || f[0]=="ME")) {
                 int slot=number(f[1],1,999);
                 if (slot<=0) return;
-                if (smsReady() && engine_.idle()) readSlot(slot);
+                if(f[0]=="ME") {
+                    meScanRequired_=meStorageAvailable_=true;meScanAttempted_=false;
+                } else if (smsReady() && engine_.idle()) readSlot(slot);
                 else {scanRequired_=true;scanAttempted_=false;}
-            } else emit(CellEventKind::Trace,"SMS in unsupported storage; only SIM (SM) inbox is read");
+            } else emit(CellEventKind::Trace,"SMS notification has an unsupported storage location");
         } else if (line=="RING" || line.rfind("+CRING:",0)==0) {
             inCall_=true; callPollSoon_=true; emit(CellEventKind::Call,"Incoming call",4);
         } else if (line.rfind("+CLIP:",0)==0) {
@@ -251,7 +283,7 @@ private:
                     if (emit(CellEventKind::SmsIn,message.text,0,id,message.sender)) {
                         if (seen_.size()==256) seen_.pop_front();
                         seen_.push_back(id);
-                    } else delivered=false; // Message remains on SIM; a later scan retries UI delivery.
+                    } else delivered=false; // Message remains in its store; a later scan retries UI delivery.
                 }
             } else emit(CellEventKind::Trace,std::string("Unsupported SMS kept in ")+store+" storage (multipart/sender/encoding)");
         }
@@ -259,18 +291,32 @@ private:
         return delivered && !expected && r.ok;
     }
     void readSlot(int index) {
-        send("AT+CMGR="+std::to_string(index),[this](const deck::AtResult& r){
+        const uint32_t generation=generation_,simGeneration=simGeneration_;
+        send("AT+CMGR="+std::to_string(index),[this,generation,simGeneration](const deck::AtResult& r){
+            if(generation!=generation_ || simGeneration!=simGeneration_) return;
             if (!parsePdus(r)) scanRequired_=true;
         });
+    }
+    bool scanInbox(uint32_t now) {
+        const bool sm=scanRequired_ && (!scanAttempted_ || uint32_t(now-lastScan_)>=PollMs);
+        const bool me=meScanRequired_ && meStorageAvailable_ && !inCall_ && !smsBusy_ &&
+            (!meReadFailed_ || uint32_t(now-lastMeFailure_)>=PollMs) &&
+            (!meScanAttempted_ || uint32_t(now-lastMeScan_)>=PollMs);
+        if(me && (!sm || nextScanMe_)) modemInbox(false);
+        else if(sm) inbox();
+        else return false;
+        return true;
     }
     void inbox() {
         if (scanning_) return;
         // Stream each header/PDU pair; SIM capacity must not determine heap use.
         auto header=std::make_shared<std::string>();
         scanning_=true; scanRequired_=false; scanAttempted_=true; lastScan_=millis();
-        const uint32_t generation=generation_;
+        nextScanMe_=true;
+        const uint32_t generation=generation_,simGeneration=simGeneration_;
         deck::AtCommand command{"AT+CMGL=4",30000,"",false,
-            [this,header,generation](const deck::AtResult& r){
+            [this,header,generation,simGeneration](const deck::AtResult& r){
+                if(generation!=generation_ || simGeneration!=simGeneration_) return;
                 scanning_=false;
                 if (r.uncertain && generation==generation_) offline("Inbox timeout; reconnecting modem");
                 if (!r.ok || !header->empty()) {
@@ -278,7 +324,8 @@ private:
                     emit(CellEventKind::Trace,"Inbox scan: "+(r.ok?std::string("incomplete PDU"):r.final));
                 }
             },
-            [this,header](const std::string& line){
+            [this,header,generation,simGeneration](const std::string& line){
+                if(generation!=generation_ || simGeneration!=simGeneration_) return;
                 if (line.rfind("+CMGL:",0)==0) {*header=line;return;}
                 if (!header->empty()) {
                     if (!parsePdus({true,false,"OK",{*header,line}})) scanRequired_=true;
@@ -361,6 +408,7 @@ private:
         if(generation!=generation_ || !linked_) return; // Reconnect configures SM after a reset/timeout.
         send("AT+CPMS=\"SM\"",[this,generation](const deck::AtResult& r){
             if(generation!=generation_ || !linked_) return;
+            scanning_=false;
             storage_=r.ok;
             emit(CellEventKind::SmsReady,"",smsReady());
             emit(CellEventKind::Trace,"SIM inbox restore: "+r.final);
@@ -375,41 +423,56 @@ private:
         if(!smsReady() || configuring_ || !engine_.idle() || inCall_ || hasPendingCall_ || smsBusy_) {
             emit(CellEventKind::Trace,"Modem busy or SMS setup unavailable; retry inbox-me shortly");return;
         }
-        const uint32_t generation=generation_;
+        modemInbox(true);
+    }
+    void modemInbox(bool raw) {
+        const uint32_t generation=generation_,simGeneration=simGeneration_;
+        scanning_=true;meScanRequired_=false;meScanAttempted_=true;lastMeScan_=millis();
+        nextScanMe_=false;
         // CPMS mem1 controls CMGL/CMGR; leave mem2 and receive preference mem3 unchanged.
         // Mark storage unavailable before the swap so an interleaved SM CMTI is
         // deferred to a SIM scan instead of reading that slot number from ME.
         storage_=false;
         emit(CellEventKind::SmsReady,"",0);
-        emit(CellEventKind::Trace,"Inspecting ME inbox; raw messages may contain private data. Reads may mark messages read; none are deleted.");
-        send("AT+CPMS=\"ME\"",[this,generation](const deck::AtResult& selected){
-            if(generation!=generation_ || !linked_) return;
-            traceLines(selected);
+        if(raw) emit(CellEventKind::Trace,"Inspecting ME inbox; raw messages may contain private data. Reads may mark messages read; none are deleted.");
+        send("AT+CPMS=\"ME\"",[this,generation,simGeneration,raw](const deck::AtResult& selected){
+            if(selected.uncertain) {meReadFailed_=true;lastMeFailure_=millis();}
+            if(generation!=generation_ || simGeneration!=simGeneration_ || !linked_) return;
+            if(raw) traceLines(selected);
             if(!selected.ok) {
+                meScanRequired_=true;
+                if(!transientSmsError(selected.final)) meStorageAvailable_=false;
                 emit(CellEventKind::Trace,"ME inbox selection: "+selected.final);
                 restoreSimInbox(generation);return;
             }
+            meStorageAvailable_=true;
             auto header=std::make_shared<std::string>();
             deck::AtCommand command{"AT+CMGL=4",30000,"",false,
-                [this,header,generation](const deck::AtResult& r){
-                    if(generation!=generation_ || !linked_) return;
+                [this,header,generation,simGeneration,raw](const deck::AtResult& r){
+                    if(generation!=generation_ || simGeneration!=simGeneration_ || !linked_) return;
                     if(r.uncertain) {
-                        offline("ME inbox timeout; reconnecting to restore SIM storage");return;
+                        offline("ME inbox timeout; reconnecting to restore SIM storage");
+                        // Retry reads only after a pause; submitted SMS is never repeated.
+                        meReadFailed_=true;lastMeFailure_=millis();return;
                     }
-                    emit(CellEventKind::Trace,"ME inbox: "+(r.ok && !header->empty()?std::string("incomplete PDU"):r.final));
+                    if(r.ok) meReadFailed_=false;
+                    if(!r.ok || !header->empty()) meScanRequired_=true;
+                    if(raw || !r.ok || !header->empty())
+                        emit(CellEventKind::Trace,"ME inbox: "+(r.ok && !header->empty()?std::string("incomplete PDU"):r.final));
                     restoreSimInbox(generation);
                 },
-                [this,header,generation](const std::string& line){
-                    if(generation!=generation_ || !linked_) return;
-                    for(size_t offset=0;offset<line.size();offset+=480)
+                [this,header,generation,simGeneration,raw](const std::string& line){
+                    if(generation!=generation_ || simGeneration!=simGeneration_ || !linked_) return;
+                    if(raw) for(size_t offset=0;offset<line.size();offset+=480)
                         emit(CellEventKind::Trace,line.substr(offset,480));
                     if(line.rfind("+CMGL:",0)==0) {*header=line;return;}
                     if(!header->empty()) {
-                        parsePdus({true,false,"OK",{*header,line}},"modem (ME)");
+                        if(!parsePdus({true,false,"OK",{*header,line}},"modem (ME)")) meScanRequired_=true;
                         header->clear();
                     }
                 }};
             if(!engine_.enqueue(std::move(command))) {
+                meScanRequired_=true;
                 emit(CellEventKind::Trace,"ME inbox: modem queue full");
                 restoreSimInbox(generation);
             }
@@ -436,6 +499,15 @@ private:
         },cmd=="AT+COPS=?"?180000:cmd=="AT+CMGL=4"?30000:10000);
     }
     void handle(const CellAction& a) {
+        // Keep explicit modem setup/diagnostics out of the TLS socket lease.
+        // SMS and call controls remain serialized by the same AT engine; inbox
+        // notifications are still retained and imported without deletion.
+        if(tcp_.activeConnection() && (a.kind==CellActionKind::NetworkQuery || a.kind==CellActionKind::Refresh ||
+           a.kind==CellActionKind::SetApn || a.kind==CellActionKind::CarrierScan ||
+           a.kind==CellActionKind::Restart || a.kind==CellActionKind::SelectAutomatic)) {
+            emit(a.kind==CellActionKind::SetApn?CellEventKind::ApnResult:CellEventKind::Trace,
+                "LTE AI data is active; wait before modem setup or diagnostics",0);return;
+        }
         if(a.kind==CellActionKind::SelectAutomatic) {
             if(!linked_ || !sim_ || configuring_ || !engine_.idle() || inCall_ || hasPendingCall_ || smsBusy_) {
                 emit(CellEventKind::Trace,"Modem busy or SIM unavailable; retry automatic selection when idle");return;
@@ -484,7 +556,10 @@ private:
             return;
         }
         if (a.kind==CellActionKind::ReadInbox) {
-            if (smsReady()) {scanRequired_=true; scanAttempted_=false;}
+            if (smsReady() || (scanning_ && linked_ && sim_ && pdu_ && notifications_)) {
+                scanRequired_=meScanRequired_=meStorageAvailable_=true;
+                scanAttempted_=meScanAttempted_=false;
+            }
             else emit(CellEventKind::Trace,"SIM inbox unavailable until SMS setup completes");
             return;
         }
@@ -510,15 +585,18 @@ private:
         pendingCall_=a; hasPendingCall_=true;
     }
     deck::AtEngine engine_;
+    CellularSocketBroker tcp_;
     std::deque<uint32_t> seen_;
     CellAction pendingCall_{};
     std::string simStatus_;
     std::string apn_;
-    uint32_t generation_=0, simGeneration_=0, lastConnect_=0, lastPoll_=0, lastCallPoll_=0, lastSmsSetup_=0, lastScan_=0;
+    uint32_t generation_=0, simGeneration_=0, lastConnect_=0, lastPoll_=0, lastCallPoll_=0, lastSmsSetup_=0, lastScan_=0,lastMeScan_=0,lastMeFailure_=0;
     unsigned diagnosticStep_=0, diagnosticCount_=0;
     bool linked_=false, sim_=false, pdu_=false, storage_=false, notifications_=false, inCall_=false;
     bool configuring_=false, smsConfiguring_=false, smsSetupAttempted_=false, smsBusy_=false;
     bool scanRequired_=true, scanning_=false, scanAttempted_=false, callPollSoon_=false, hasPendingCall_=false;
+    bool meScanRequired_=true,meScanAttempted_=false,meStorageAvailable_=true,nextScanMe_=false;
+    bool meReadFailed_=false;
     bool apnPending_=false;
     int reg_=-1;
 };

@@ -10,6 +10,12 @@ char KeyboardDecoder::feed(uint8_t event) {
     if(number==32) return 27;
     if(number==33) return ' ';
     if(number==34) return alt_?'0':0;
+    // Read older/newer thread pages without stealing ordinary letters or the
+    // keyboard's printed Alt punctuation. Either Shift key can form the chord.
+    if(alt_ && (leftShift_ || rightShift_)) {
+        if(number==13)return 17; // Shift+Alt+K: older
+        if(number==14)return 18; // Shift+Alt+J: newer
+    }
     static const char letters[30]={
         'p','o','i','u','y','t','r','e','w','q',
         '\b','l','k','j','h','g','f','d','s','a',

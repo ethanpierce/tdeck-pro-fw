@@ -12,6 +12,7 @@ bool AtEngine::enqueue(AtCommand command, bool urgent) {
 }
 void AtEngine::reset(const std::string& reason) {
     cooling_ = true;
+    coolingDuration_ = 2000;
     cooledAt_ = now_;
     line_.clear();
     dropping_ = false;
@@ -31,11 +32,12 @@ void AtEngine::tick(uint32_t now) {
         // Abort SMS input and quarantine late results. Never retry a submitted SMS.
         tx_(std::string(1, '\x1b'));
         cooling_ = true;
+        coolingDuration_ = 2000;
         cooledAt_ = now;
         finish(false, "Timeout; result unknown. Refresh before retrying.", true);
     }
     if (cooling_) {
-        if (uint32_t(now - cooledAt_) < 2000) return;
+        if (uint32_t(now - cooledAt_) < coolingDuration_) return;
         cooling_ = false;
         line_.clear();
         dropping_ = false;
@@ -58,7 +60,7 @@ void AtEngine::feed(char byte) {
         line_.clear();
         prompted_ = true;
         started_ = now_;
-        tx_(command_.payload + '\x1a');
+        tx_(command_.appendPayloadCtrlZ ? command_.payload + '\x1a' : command_.payload);
         return;
     }
     if (byte == '\n') {
@@ -73,6 +75,7 @@ void AtEngine::feed(char byte) {
         dropping_ = true;
         if (active_) {
             cooling_ = true;
+            coolingDuration_ = 2000;
             cooledAt_ = now_;
             finish(false, "Oversize modem response", true);
         }
@@ -87,23 +90,37 @@ void AtEngine::line(const std::string& raw) {
     bool registration = value.rfind("+CEREG:", 0) == 0 || value.rfind("+CREG:", 0) == 0 ||
         value.rfind("+CGREG:", 0) == 0;
     bool pin = value.rfind("+CPIN:", 0) == 0;
+    bool socketDataReady=false;
+    if(value.rfind("+CIPRXGET:",0)==0){auto f=csv(value.substr(value.find(':')+1));socketDataReady=f.size()==2 && f[0]=="1";}
+    bool socket = value.rfind("+NETOPEN:",0)==0 || value.rfind("+CIPOPEN:",0)==0 ||
+        value.rfind("+CIPSEND:",0)==0 || value.rfind("+CIPCLOSE:",0)==0 ||
+        value.rfind("+IPCLOSE:",0)==0 || socketDataReady ||
+        value.rfind("+CIPEVENT:",0)==0;
     bool unsolicited = callEnd || value == "RING" || value == "RDY" ||
         value.rfind("+CMTI:", 0) == 0 || value.rfind("+CLIP:", 0) == 0 ||
         value.rfind("+CRING:", 0) == 0 || value.rfind("VOICE CALL:", 0) == 0 ||
         value.rfind("VOICE CALL END:", 0) == 0 ||
-        registration || pin || value == "SMS DONE" || value == "PB DONE";
+        registration || pin || socket || value == "SMS DONE" || value == "PB DONE";
     // Cancel old callbacks before the URC handler queues a fresh initialization.
     if (value == "RDY") reset("Modem restarted; previous result unknown");
     if (unsolicited) urc_(value);
     if (!active_ || cooling_) return;
     if (value == command_.text) return; // Echo before ATE0 takes effect.
     if (value == "OK") { finish(true, value); return; }
+    if(value.rfind("+IP ERROR:",0)==0) {
+        // Some A76XX versions append ERROR, others stop at +IP ERROR. A short
+        // drain interval consumes that optional suffix before another command.
+        cooling_=true;coolingDuration_=200;cooledAt_=now_;
+        finish(false,value);return;
+    }
     if (value == "ERROR" || value.rfind("+CME ERROR", 0) == 0 ||
         value.rfind("+CMS ERROR", 0) == 0 || (callEnd && command_.callControl)) {
         finish(false, value); return;
     }
     if (unsolicited) {
         bool queryResponse = (pin && command_.text == "AT+CPIN?") ||
+            (value.rfind("+NETOPEN:",0)==0 && command_.text=="AT+NETOPEN?") ||
+            (value.rfind("+CIPOPEN:",0)==0 && command_.text=="AT+CIPOPEN?") ||
             (registration && command_.text == "AT" + value.substr(0, value.find(':')) + "?");
         if (!queryResponse) return;
     }
@@ -116,6 +133,7 @@ void AtEngine::line(const std::string& raw) {
     responseBytes_ += value.size();
     if (result_.lines.size() >= 48 || responseBytes_ > 8192) {
         cooling_ = true;
+        coolingDuration_ = 2000;
         cooledAt_ = now_;
         finish(false, "Modem response limit exceeded", true);
         return;
