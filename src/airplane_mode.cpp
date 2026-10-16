@@ -42,7 +42,17 @@ bool setAirplaneMode(bool value) {
 }
 const char* airplaneStatus() {
     if(!enabled.load())return saved?"Off":"Off. Setting was not saved.";
-    if(!cellAirplaneStopped() || !bleAirplaneStopped() || (wifi && !wifi->airplaneStopped()) ||
-       (mesh && mesh->ready) || (gps && gps->snapshot().enabled))return "Turning off radios...";
+    if(!radiosStopped())return "Turning off radios...";
     return saved?"On. All radios are off.":"On. Radios off; setting was not saved.";
+}
+bool radiosStopped() {
+    return cellAirplaneStopped() && bleAirplaneStopped() && (!wifi || wifi->airplaneStopped()) &&
+        (!mesh || !mesh->ready) && (!gps || !gps->snapshot().enabled);
+}
+void suspendRadiosForShutdown() {
+    generation.fetch_add(1);enabled=true;
+    cellRequestPowerOff();bleSuspendForAirplane(true);
+    if(wifi)wifi->suspendForAirplane(true);
+    if(mesh)mesh->suspendForAirplane(true);
+    if(gps)gps->suspendForAirplane(true);
 }

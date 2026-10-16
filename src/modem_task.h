@@ -24,3 +24,5 @@ bool startCellTask(const char* savedApn="");
 // Independent of the action queue: power-off cannot wait behind a carrier scan.
 void cellSuspendForAirplane(bool suspended);
 bool cellAirplaneStopped();
+// Best-effort AT+CPOF only on an idle UART; otherwise cancel without replay.
+void cellRequestPowerOff();

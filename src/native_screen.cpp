@@ -50,7 +50,7 @@ bool Screen::initializePanel() {
     if(initialized_)return true;
     const uint8_t reset[]={0x1e,0x0d},settings[]={0x1f,0x0d};
     if(!command(0x00,reset,sizeof(reset)))return false;
-    platform::delay(1);powered_=false;
+    platform::delay(1);powered_=false;offConfirmed_=false;
     if(!command(0x00,settings,sizeof(settings)))return false;
     initialized_=true;return true;
 }
@@ -81,15 +81,17 @@ bool Screen::update(bool partial) {
     if(!command(0xe0,&cascade,1) || !command(0xe5,&temperature,1) || !command(0x50,&border,1))return false;
     if(!powered_) {
         if(!command(0x04) || !waitReady())return false;
-        powered_=true;
+        powered_=true;offConfirmed_=false;
     }
     if(!command(0x12) || !waitReady())return false;
     initialized_=false;
     return !partial || command(0x92);
 }
 bool Screen::powerOff() {
-    if(powered_ && (!command(0x02) || !waitReady()))return false;
-    powered_=false;return true;
+    // Panel-setting reinitialization clears our powered_ cache while copying
+    // the post-refresh plane. It does not prove the boost supply is off.
+    if(!offConfirmed_ && (!command(0x02) || !waitReady()))return false;
+    powered_=false;offConfirmed_=true;return true;
 }
 bool Screen::refresh() {
     if(width_<=0 || height_<=0)return true;

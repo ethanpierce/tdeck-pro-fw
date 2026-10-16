@@ -1,19 +1,25 @@
 # Development paused — 2026-10-16
 
-Paused at the user's explicit request before a flight. All three subagents have
-been stopped. Do not resume development, radio testing, sending, flashing,
-release publication or pairing until the user asks to continue. The local USB
-console and browser setup server were closed. No automatic follow-up is set.
+The user resumed development for the BOOT power-off feature only. All subagents
+remain stopped; no automatic follow-up is set. Broader Mesh/GPS/voice/release
+acceptance is still pending.
 
-This is a **work-in-progress source checkpoint**, not a tested release. The
-combined UI/Meshtastic/GPS/Airplane build has not been flashed or fully validated.
-The new Airplane mode is therefore **not installed on the bench device**.
+The native combined build with shutdown support and the final display-power
+correction is flashed. The user confirmed both BOOT hold paths, the shutdown
+screens and RESET wake-up. Clean USB shutdown passed on the final image and the
+device was left asleep. Battery-only behavior and off-state current remain
+unmeasured.
+See [POWER_OFF.md](POWER_OFF.md) and the latest [bench entry](BENCH_2026-10-16.md).
+The original pause snapshot and older baseline below are historical context.
 
-## Priority next feature: Settings → Power off
+## Power-off feature and remaining acceptance
 
-Requested during the pause: the user must be able to power down from Settings
-without unplugging the battery. This is a requirement for resumed development;
-it has not been implemented or flashed, and development remains paused.
+Requested during the pause and then explicitly resumed: power down without
+unplugging the battery. Implemented via BOOT hold and Settings. The board cannot
+provide true battery isolation together with RESET wake; both shutdown paths
+use radio-off deep sleep. The requirements/tests below remain the acceptance
+checklist; completed button tests are recorded in the bench log, while battery
+current and the remaining power/UI acceptance checks are still outstanding.
 
 Implementation requirements:
 
@@ -121,10 +127,10 @@ Airplane changes**:
    inspect radio shutdown/restart/initialization errors, no stale queued work,
    all saved preferences captured under boot suspension, failure acknowledgements,
    AI generation guards, modem cancellation and Mesh CAD/timeout cleanup.
-3. `tools/test.sh` currently includes fifteen binaries. **Add the completed
-   UI layout suite to that runner** using `tests/ui_layout_test.cpp`,
-   `lib/DeckCore/src/ui_layout.cpp` and `lib/DeckCore/src/mono_canvas.cpp`, then
-   run the full suite with ASan/UBSan and warnings as errors. Check GCC as well
+3. `tools/test.sh` now includes eighteen binaries, with the UI layout and both
+   shutdown suites included. The prior seventeen-suite full run and the added
+   monitor suite passed with ASan/UBSan; the panel shutdown test was checked
+   separately. Re-run appropriate suites after any new change. Check GCC as well
    as macOS Clang for misleading-indentation warnings.
 4. Run the standalone Mesh official-schema fixture generator/verification per
    [MESH.md](MESH.md), and re-run NMEA/GPS lifecycle tests after the latest UTC

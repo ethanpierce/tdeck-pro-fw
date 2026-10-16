@@ -35,7 +35,7 @@ struct Harness {
     std::function<bool(const std::string&,unsigned)> custom;
     Harness(uint32_t stop) {
         current=0;until=stop;tickHook={};platform::modemUart.rx.clear();
-        cellSuspendForAirplane(false);modemStarts=modemStops=0;
+        shutdownRequested=false;cellSuspendForAirplane(false);modemStarts=modemStops=0;
         if(cellEvents)vQueueDelete(cellEvents);
         if(cellActions)vQueueDelete(cellActions);
         cellEvents=xQueueCreate(4096,sizeof(CellEvent));cellActions=xQueueCreate(6,sizeof(CellAction));
@@ -62,6 +62,35 @@ struct Harness {
     std::vector<CellEvent> events(){std::vector<CellEvent> out;CellEvent e{};while(xQueueReceive(cellEvents,&e,0))out.push_back(e);return out;}
 };
 int main(){
+    {
+        Harness h(3000);
+        tickHook=[&]{if(current==500){cellRequestPowerOff();h.action(CellActionKind::Sms,801);h.action(CellActionKind::Dial);}};
+        h.run();assert(h.count["AT+CPOF"]==1 && cellAirplaneStopped() && !cellTcpReady());
+        assert(h.totalPrefix("AT+CMGS=")==0 && h.totalPrefix("ATD")==0 && modemStarts==1);
+        std::cout<<"PASS clean idle shutdown requests modem power-off once and drops unsent SMS/call\n";
+    }
+    {
+        Harness h(4000);
+        h.custom=[&](const std::string& cmd,unsigned){return cmd=="AT+CPOF";};
+        tickHook=[&]{if(current==500)cellRequestPowerOff();};
+        h.run();assert(h.count["AT+CPOF"]==1 && cellAirplaneStopped() && modemStarts==1);
+        for(const auto& item:h.tx)assert(item.first<2600);
+        std::cout<<"PASS unresponsive modem shutdown has a bounded deadline and no reconnect\n";
+    }
+    {
+        Harness h(3000);
+        h.custom=[&](const std::string& cmd,unsigned){return !cmd.empty() && cmd.back()=='\x1a';};
+        tickHook=[&]{if(current==500)h.action(CellActionKind::Sms,802);if(current==600)cellRequestPowerOff();};
+        h.run();assert(h.totalPrefix("AT+CMGS=")==1 && h.count["AT+CPOF"]==0 && cellAirplaneStopped());
+        bool unknown=false;for(const auto& e:h.events())if(e.kind==CellEventKind::Failed && e.id==802)unknown=e.value==1;
+        assert(unknown);for(const auto& item:h.tx)assert(item.first<600);
+        std::cout<<"PASS active SMS shutdown cancels as unknown without injecting an AT command or replay\n";
+    }
+    {
+        Harness h(1000);cellRequestPowerOff();h.run();
+        assert(h.tx.empty() && modemStarts==0 && cellAirplaneStopped());
+        std::cout<<"PASS shutdown before modem startup never enables its rail\n";
+    }
     {
         Harness h(2000);cellSuspendForAirplane(true);
         tickHook=[&]{if(current==100)h.action(CellActionKind::Sms,711);if(current==200)h.action(CellActionKind::Dial);};

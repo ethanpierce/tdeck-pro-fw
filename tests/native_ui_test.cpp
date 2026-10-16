@@ -68,6 +68,8 @@ int main() {
     assert(last(0x90).data==std::vector<uint8_t>({0,239,0,214,1,11,1}));
     reset();screen.setPartialWindow(7,10,2,3);assert(screen.refresh());
     assert(last(0x13).data.size()==6); // Byte-align 7..8 to 0..15, 3 rows
+    reset();assert(screen.shutdown());assert(count(0x02)==1 && !acquired && pins[34]);
+    assert(screen.shutdown() && count(0x02)==1); // Repeated shutdown does not wake the panel.
     reset();failTransfer=true;assert(!screen.refresh());assert(!acquired && pins[34]);
     reset();stuckBusy=true;const auto before=tick;assert(!screen.refresh());assert(tick-before>10000 && !acquired && pins[34]);
     std::cout<<"Native UI / display protocol tests passed\n";

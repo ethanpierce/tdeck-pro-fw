@@ -14,6 +14,7 @@
 #include <chat_lines.h>
 #include "gps_service.h"
 #include "airplane_mode.h"
+#include "power_control.h"
 #include "wifi_service.h"
 #include "ble_service.h"
 #include "ai_chat.h"
@@ -45,7 +46,7 @@ AiChat ai;
 GpsService gps;
 unsigned conversationCursor=0,threadScroll=0,modelCursor=0,settingsCursor=0,homeCursor=0;
 constexpr unsigned ThreadRows=10;
-enum class Page { Home, Messages, SmsNumber, SmsThread, Phone, Radio, Diagnostics, Settings, Connections, MessagingSettings, DisplaySettings, CellularSettings, MeshSettings, MeshRegion, MeshPreset, MeshChannel, MeshKey, MeshNodes, Location, Apn, Carriers, Wifi, WifiSsid, WifiPassword, WifiForget, Ble, BlePair, BleForget, Ai, AiSetup, AiModelPicker, AiEndpoint, AiModel, AiKey };
+enum class Page { Home, Messages, SmsNumber, SmsThread, Phone, Radio, Diagnostics, Settings, PowerOff, Connections, MessagingSettings, DisplaySettings, CellularSettings, MeshSettings, MeshRegion, MeshPreset, MeshChannel, MeshKey, MeshNodes, Location, Apn, Carriers, Wifi, WifiSsid, WifiPassword, WifiForget, Ble, BlePair, BleForget, Ai, AiSetup, AiModelPicker, AiEndpoint, AiModel, AiKey };
 Page page=Page::Home;
 Page threadReturn=Page::Messages;
 Page aiSetupReturn=Page::Home;
@@ -99,7 +100,7 @@ const char* pageName() {
     case Page::Home:return "Home"; case Page::Messages:return "Messages";
     case Page::SmsNumber:return "New SMS"; case Page::SmsThread:return "SMS conversation";
     case Page::Phone:return "Phone"; case Page::Radio:return "Radio";
-    case Page::Diagnostics:return "Device status";case Page::Settings:return "Settings";
+    case Page::Diagnostics:return "Device status";case Page::Settings:return "Settings";case Page::PowerOff:return "Power off";
     case Page::Connections:return "Connections";case Page::MessagingSettings:return "Messaging settings";
     case Page::DisplaySettings:return "Display";case Page::CellularSettings:return "Cellular";
     case Page::MeshSettings:return "Meshtastic";case Page::MeshRegion:return "Mesh region";
@@ -407,6 +408,7 @@ void printStatus() {
     platform::console.printf("Wi-Fi: %s | IP: %s | Saved network: %s\n",wifi.status.c_str(),wifi.address.c_str(),settings.wireless().ssid[0]?"yes":"no");
     platform::console.printf("BLE: %s | Phone: %s | Keyboard: %s | Dropped BLE events: %lu\n",bleStatus.c_str(),phoneStatus.c_str(),keyboardStatus.c_str(),(unsigned long)droppedBleEvents.load());
     platform::console.printf("Heap: %u free / %u minimum | PSRAM: %u free\n",unsigned(platform::freeHeap()),unsigned(platform::minimumFreeHeap()),unsigned(platform::freePsram()));
+    platform::console.printf("Power button: BOOT 5s shutdown / 30s force; task stack free: %u bytes\n",unsigned(powerTaskStackFree()));
     platform::console.printf("AI: %s | Key: %s | Setup storage: %s\n",ai.status.c_str(),aiSettings.values().key[0]?"saved (hidden)":"not set",aiSettings.persistent?"NVS":"unavailable");
     platform::console.printf("Display: %lu ms last / %lu ms maximum | Keys buffered during last frame: %u | Dropped keys: %lu\n",
         (unsigned long)lastDrawMs,(unsigned long)maxDrawMs,frameQueuedKeys,(unsigned long)busyKeys.dropped());
@@ -421,12 +423,15 @@ void help() {
     platform::console.println("ai | ai setup | ai clear | ai endpoint <https-base> | ai model <id> | ai key <secret> | ai clear-key");
     platform::console.println("ai ask <message> (one real provider request using the saved setup)");
     platform::console.println("airplane on | airplane off | airplane status");
+    platform::console.println("power off (clean shutdown; RESET starts again)");
     platform::console.println("sms +15551234567|Hello | dial +15551234567 | answer | hangup | lora Hello");
-    platform::console.println("No messages/calls are sent at boot. LoRa is plaintext; no delivery acknowledgements.");
+    platform::console.println("No messages/calls are sent at boot. Mesh channel key required; no delivery acknowledgements.");
 }
 void command(Text line) {
     line.trim();
+    if(powerOffRequested()){platform::console.println("Powering off; input ignored.");return;}
     if(line=="help") help();
+    else if(line=="power off")requestPowerOff();
     else if(line=="airplane status")platform::console.println(airplaneStatus());
     else if(line=="airplane on" || line=="airplane off") {
         setAirplaneMode(line=="airplane on");inform(airplaneStatus());
@@ -545,14 +550,14 @@ void sendConversation() {
     input="";threadScroll=0;changed();
 }
 void key(char c) {
-    if(!c) return;
+    if(!c || powerOffRequested()) return;
     if(c==27){
         cancelPair();
         if(inConversation()){if(threadReturn==Page::Messages)openMessages();else home();}
         else if(page==Page::SmsNumber){const bool location=pendingLocationText.length();pendingLocationText="";if(location)openCategory(Page::Location);else openMessages();}
         else if(page==Page::AiModelPicker || page==Page::AiEndpoint || page==Page::AiModel || page==Page::AiKey)openAiSetup(aiSetupReturn);
         else if(page==Page::AiSetup){if(aiSetupReturn==Page::Ai)openAi(threadReturn);else if(aiSetupReturn==Page::MessagingSettings)openCategory(Page::MessagingSettings);else openSettings();}
-        else if(page==Page::Connections || page==Page::MessagingSettings || page==Page::DisplaySettings || page==Page::Location || page==Page::Diagnostics)openSettings();
+        else if(page==Page::Connections || page==Page::MessagingSettings || page==Page::DisplaySettings || page==Page::Location || page==Page::Diagnostics || page==Page::PowerOff)openSettings();
         else if(page==Page::Wifi || page==Page::Ble || page==Page::CellularSettings)openCategory(Page::Connections);
         else if(page==Page::MeshSettings){if(meshSetupReturn==Page::Radio)openRadio(threadReturn);else openCategory(Page::MessagingSettings);}
         else if(page==Page::MeshRegion || page==Page::MeshPreset || page==Page::MeshChannel || page==Page::MeshKey || page==Page::MeshNodes)openCategory(Page::MeshSettings);
@@ -561,6 +566,12 @@ void key(char c) {
         else if(page==Page::BleForget)openBle();else home();
         return;
     }
+    if(page==Page::PowerOff) {
+        if(c=='n'){openSettings();return;}
+        if((c=='y' || c=='\r' || c=='\n') && !applyingBusyKey && renderedPage==Page::PowerOff && !ui.pending)requestPowerOff();
+        return;
+    }
+    if(page==Page::Settings && c=='o'){page=Page::PowerOff;changed();return;}
     if(page==Page::Home) {
         if(c=='j' || c==18){homeCursor=(homeCursor+1)%3;changed();return;}
         if(c=='k' || c==17){homeCursor=(homeCursor+2)%3;changed();return;}
@@ -922,7 +933,12 @@ void applyBusyKeys() {
 void touchAt(int x,int y) {
     // Never interpret a tap against a page or draft newer than the visible
     // e-paper image. Send, Call and Share all have separate explicit targets.
-    if(ui.pending || !board::screen)return;
+    if(powerOffRequested() || ui.pending || !board::screen)return;
+    if(page==Page::Settings && deck::UiRect{150,40,80,25}.contains(x,y)){key('o');return;}
+    if(page==Page::PowerOff) {
+        if(deck::UiRect{10,203,220,35}.contains(x,y)){key('y');return;}
+        if(deck::UiRect{10,246,220,25}.contains(x,y)){key('n');return;}
+    }
     if(y>=303){if(x>=170)home();else key(27);return;}
     if(page!=Page::Home && x<36 && y>=36 && y<=65){key(27);return;}
     if(page==Page::Home){for(unsigned n=0;n<3;++n)if(deck::homeRow(n).contains(x,y)){homeCursor=n;key("mps"[n]);return;}}
@@ -1020,12 +1036,19 @@ void draw() {
         } else if(page==Page::Phone)phoneView();
         else if(page==Page::Settings) {
             pageTitle("Settings");
+            button({150,40,80,25},"Power off");
             settingRow(0,"Airplane mode",airplaneStatus(),'A');
             settingRow(1,"Connections","Wi-Fi, Bluetooth, cellular",'C');
             settingRow(2,"Messaging","AI and Meshtastic",'M');
             settingRow(3,"Display","Screen and keyboard lights",'D');
             settingRow(4,"Location",settings.radios().gpsEnabled?"GPS on":"GPS off",'L');
             settingRow(5,"About","Device and network status",'I');
+        } else if(page==Page::PowerOff) {
+            pageTitle("Power off");
+            wrap("Turn off Handheld OS?",10,90,35,2);
+            wrap("Press RESET to start again.",10,121,35,3);
+            button({10,203,220,35},"Power off",true);
+            button({10,246,220,25},"Cancel");
         } else if(page==Page::Connections) {
             pageTitle("Connections");
             settingRow(0,"Wi-Fi",wifi.status,'W',airplaneMode());
@@ -1182,6 +1205,39 @@ void draw() {
     ui.rendered(snapshot);
     applyBusyKeys();
 }
+void shutdownView(const char* title,bool final) {
+    if(!board::screen)return;
+    auto& screen=*board::screen;
+    screen.setBusyCallback(nullptr); // Do not capture/apply normal input now.
+    screen.setFullWindow();screen.fillScreen(deck::Paper);screen.setTextColor(deck::Ink);
+    text(18,99,title,2);
+    text(18,143,final?"Press RESET to start again.":"Stopping radios and saving state.");
+    if(final && platform::gpioRead(board::Boot)==0)text(18,165,"Release BOOT to finish.");
+    if(!screen.refresh())platform::console.println("Power off: display update failed; shutdown continues.");
+    screen.shutdown();
+}
+void shutdownPoll() {
+    static bool started=false,finished=false;
+    if(finished)return;
+    if(!started) {
+        started=true;keyboard.trace=false;busyKeys.reset();
+        suspendRadiosForShutdown();
+        board::lights(false,false);
+        shutdownView("Shutting down",false);
+    }
+    cellPoll();blePoll();wifi.poll();ai.poll();
+    if(!radiosStopped())return;
+    // Every ordinary save commits synchronously. Resolve only remaining
+    // pending records after draining final radio results; preserve all content.
+    for(const auto& message:store.messages())
+        if(message.delivery==Delivery::Pending)store.update(message.sequence,Delivery::Unknown);
+    shutdownView("Powered off",true);
+    // Disable keypad scanning; RESET's normal initialization restores it.
+    for(uint8_t reg=0x1d;reg<=0x1f;++reg){const uint8_t bytes[]={reg,0};platform::i2cWrite(0x34,bytes,2);}
+    finished=true;
+    platform::console.printf("Power off: cleanup complete; BOOT %s; RESET starts again.\n",platform::gpioRead(board::Boot)==0?"held":"released");
+    powerOffReady();
+}
 }
 void setupDevice() {
     platform::begin(); // Boot on battery without waiting for a USB host.
@@ -1189,6 +1245,7 @@ void setupDevice() {
     if(nvsStatus!=ESP_OK)platform::console.println("Saved storage unavailable; keeping existing NVS unchanged.");
     board::begin();
     if(board::unsupported) {platform::console.println("T-Deck Pro MAX detected; unsupported profile. Radios disabled.");return;}
+    if(!startPowerControl())platform::console.println("BOOT monitor unavailable; use Settings Power off.");
     keyboard.begin();
     if(board::screen)board::screen->setBusyCallback(captureBusyKeys);
     touch.begin();
@@ -1200,6 +1257,7 @@ void setupDevice() {
     wifi.changed=[](const std::string& value){inform(Text("Wi-Fi: ")+Text(value));};
     wifi.signalChanged=[](){changed();};
     initializeAirplaneMode(settings,wifi,radio,gps);
+    if(powerOffRequested())suspendRadiosForShutdown();
     wifi.configure(settings.wireless());
     gps.configure(settings.radios().gpsEnabled);
     bleTask=startBleTask();
@@ -1226,6 +1284,7 @@ void setupDevice() {
 }
 void loopDevice() {
     if(board::unsupported) {delay(100);return;}
+    if(powerOffRequested()){shutdownPoll();delay(5);return;}
     serialPoll(); cellPoll(); wifi.poll(); blePoll();gps.poll();
     if(ai.poll()){aiPending="";threadScroll=0;changed();}
     if(page==Page::Location) {

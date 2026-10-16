@@ -1,8 +1,8 @@
 # Handheld OS
 
-> Development paused on 2026-10-16. This is a work-in-progress checkpoint; the
-> combined UI, Meshtastic, GPS and Airplane mode changes are not yet flashed or
-> fully validated. See [the resume plan and test checklist](docs/DEVELOPMENT_PAUSE.md).
+> Power-button shutdown work resumed on 2026-10-16. The native build is flashed;
+> the new Mesh/GPS features still require their physical acceptance tests.
+> See [power-off controls](docs/POWER_OFF.md) and the [remaining test plan](docs/DEVELOPMENT_PAUSE.md).
 
 A touch and keyboard firmware for the **LILYGO T-Deck Pro with an A7682E modem and 915 MHz SX1262 radio**. It runs on the ESP32-S3 using native ESP-IDF 5.4 and FreeRTOS, with e-paper conversations for SMS, AI and a Meshtastic channel, a touch dialer, settings and USB diagnostics.
 
@@ -28,7 +28,7 @@ This is experimental hobby firmware. **The native ESP-IDF/FreeRTOS build was fla
 | Phone | Numeric touch keypad, complete phone-number preview, Call/Answer/End controls and call-state polling |
 | Meshtastic | Bounded native leaf client for encrypted channel text and node information; off until configured with an explicit US region |
 | History | Last 16 combined SMS/LoRa messages in NVS, with integrity checks and duplicate filtering |
-| Settings | Airplane mode, Connections, Messaging, Display, Location and About categories |
+| Settings | Power off confirmation, Airplane mode, Connections, Messaging, Display, Location and About categories |
 | Location | Receive-only GPS, fix/satellite status and explicit SMS sharing of a captured Google Maps link |
 | Wi-Fi | 2.4 GHz scan, network/password entry, DHCP connection, saved credentials and forget |
 | Bluetooth LE | Keyboard discovery/HID host, authenticated phone companion service and bond controls; pairing bench tests deferred |
@@ -89,6 +89,14 @@ Outbound SMS accepts printable ASCII characters available in GSM-7, up to 160 se
 “Modem accepted” confirms an SMS submission, not delivery to the recipient. “Transmitted” confirms the mesh radio completed transmission, not reception by another device. An interrupted operation may become “Result unknown”; check the receiving device before manually retrying. Stored SMS messages are never automatically deleted; a full receiving store can block new delivery.
 
 ## Settings
+
+Hold **BOOT for 5 seconds** to start a clean shutdown. The screen shows
+**Shutting down**, then **Powered off — Press RESET to start again**.
+Release BOOT, then press RESET when you want to restart. A continuous
+**30-second total hold** forces radio-off deep sleep through an independent
+monitor if cleanup or the UI is stuck. This is not physical battery isolation.
+Settings also has a top-right **Power off** button with confirmation (keyboard:
+**O**). See [shutdown behavior and hardware limits](docs/POWER_OFF.md).
 
 **Airplane mode** powers down or suspends all five radios. Its status distinguishes shutdown in progress from confirmed off. Radio controls and sends are unavailable while it is active; disabling airplane mode restores saved preferences. A request interrupted by airplane mode is not automatically replayed.
 

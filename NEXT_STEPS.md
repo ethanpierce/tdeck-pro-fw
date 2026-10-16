@@ -1,22 +1,16 @@
 # Next hardware checks
 
-**Development is paused at the user's request.** Read
-[the complete checkpoint and resume/test plan](docs/DEVELOPMENT_PAUSE.md) first.
-The combined new feature build is not flashed or fully validated. All subagents
-are stopped; no automatic resume is scheduled.
+The user resumed **power-off work only**. BOOT 5-second clean shutdown,
+30-second forced radio-off deep sleep, RESET wake policy, Settings confirmation
+and the Shutting down / Powered off screens are implemented and flashed.
+The user confirmed both physical hold paths, shutdown screens and RESET wake.
+The final display-power correction is flashed and clean USB shutdown passed;
+the device was left asleep. Battery-only behavior and current measurements
+remain unverified. See [POWER_OFF.md](docs/POWER_OFF.md).
 
-## Priority when development resumes: Settings → Power off
-
-Add an accessible **Power off** action in Settings. The user must be able to
-shut the device down with the battery connected. Include a short confirmation,
-finish or cancel pending work without replay, preserve saved settings/history,
-show a final "Powered off" e-paper screen, turn off lights and all radios, and
-enter the lowest supported power state. Establish and test a simple way to
-turn it back on. Verify the board's power-management/ship-mode capabilities
-before choosing the implementation; distinguish deep sleep from complete
-electrical power removal honestly. Measure battery current and verify behavior
-with USB connected/disconnected, repeated shutdown/wake, and interrupted sends.
-See the [detailed shutdown requirements and tests](docs/DEVELOPMENT_PAUSE.md#priority-next-feature-settings--power-off).
+All subagents remain stopped. Mesh/GPS peer/outdoor tests, broader UI acceptance
+and release publication remain outstanding; no automatic follow-up is scheduled.
+Read [the remaining checkpoint/test plan](docs/DEVELOPMENT_PAUSE.md).
 
 Handheld OS uses native ESP-IDF 5.4.0 and FreeRTOS; Arduino has been removed.
 The original flash and private settings were backed up before flashing. Read the

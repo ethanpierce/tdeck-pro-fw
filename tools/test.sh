@@ -25,6 +25,11 @@ flags=(-std=c++17 -Wall -Wextra -Werror -g -O1
   lib/DeckCore/src/cellular_http_protocol.cpp lib/DeckCore/src/ai_protocol.cpp \
   lib/DeckCore/src/at_engine.cpp -o build/cellular_http_test
 "${CXX:-g++}" "${flags[@]}" tests/ui_input_test.cpp -o build/ui_input_test
+"${CXX:-g++}" "${flags[@]}" tests/ui_layout_test.cpp lib/DeckCore/src/ui_layout.cpp \
+  lib/DeckCore/src/mono_canvas.cpp -o build/ui_layout_test
+"${CXX:-g++}" "${flags[@]}" tests/power_button_test.cpp -o build/power_button_test
+"${CXX:-g++}" "${flags[@]}" -DDECK_POWER_CONTROL_TEST -Itests/fakes/power -Itests/fakes -Isrc \
+  tests/power_control_test.cpp -o build/power_control_test
 "${CXX:-g++}" "${flags[@]}" -Itests/fakes/display -Isrc tests/native_ui_test.cpp \
   src/native_screen.cpp lib/DeckCore/src/mono_canvas.cpp -o build/native_ui_test
 "${CXX:-g++}" "${flags[@]}" tests/mesh_protocol_test.cpp \
@@ -44,6 +49,9 @@ ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}" ./build/conversations_test
 ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}" ./build/touch_test
 ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}" ./build/cellular_http_test
 ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}" ./build/ui_input_test
+ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}" ./build/ui_layout_test
+ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}" ./build/power_button_test
+ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}" ./build/power_control_test
 ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}" ./build/native_ui_test
 ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}" ./build/mesh_protocol_test
 ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}" ./build/radio_gate_test

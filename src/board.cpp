@@ -32,7 +32,7 @@ void begin() {
     // Release modem controls and shared-SPI selects/reset as well, before
     // their output levels are configured below or by the cellular task.
     for (int pin : {ModemPower, RadioPower, GpsPower, ModemKey, ModemReset, ModemDtr,
-                    EpdCs, SdCs, RadioCs, RadioReset}) {
+                    EpdCs, EpdDc, SdCs, RadioCs, RadioReset, KeyboardLight, FrontLight}) {
         gpio_hold_dis(static_cast<gpio_num_t>(pin));
     }
     gpio_deep_sleep_hold_dis();
@@ -69,6 +69,17 @@ void stopModemPower() {
     output(ModemKey,false);
     output(ModemDtr,false);
     output(ModemReset,true);
+}
+void holdPowerOff() {
+    if(unsupported)return;
+    const auto hold=[](int pin,bool level){
+        output(pin,level);gpio_hold_en(static_cast<gpio_num_t>(pin));
+    };
+    hold(ModemPower,false);hold(RadioPower,false);hold(GpsPower,false);
+    hold(ModemKey,false);hold(ModemDtr,false);hold(ModemReset,true);
+    hold(RadioReset,false);hold(RadioCs,true);hold(EpdCs,true);hold(SdCs,true);
+    hold(KeyboardLight,false);
+    if(revision11)hold(FrontLight,false);
 }
 bool startModemPower(bool (*allowed)()) {
     if (unsupported) return false;

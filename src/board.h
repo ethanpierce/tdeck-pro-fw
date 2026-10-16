@@ -4,6 +4,7 @@ namespace board {
 constexpr int Sda=13, Scl=14, Sck=36, Mosi=33, Miso=47;
 constexpr int EpdCs=34, EpdDc=35, EpdBusy=37, SdCs=48;
 constexpr int KeyboardLight=42, FrontLight=45, GpsPower=39;
+constexpr int Boot=0;
 constexpr int GpsEspRx=44, GpsEspTx=43;
 constexpr int RadioCs=3, RadioIrq=5, RadioReset=4, RadioBusy=6, RadioPower=46;
 // LILYGO names TXD/RXD from the MODEM's perspective.
@@ -18,4 +19,6 @@ void lights(bool front,bool keyboard);
 // Cellular task only: prepare the rail, then pulse the inverted PWRKEY.
 bool startModemPower(bool (*allowed)()=nullptr);
 void stopModemPower();
+// No bus access. Hold disabled rails/lights through deep sleep until RESET.
+void holdPowerOff();
 }

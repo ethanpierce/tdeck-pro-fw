@@ -15,6 +15,7 @@ QueueHandle_t cellEvents=nullptr, cellActions=nullptr;
 std::atomic<uint32_t> droppedCellEvents{0};
 namespace {
 std::atomic<bool> airplaneSuspended{false},powerStopped{true};
+std::atomic<bool> shutdownRequested{false};
 std::atomic<uint32_t> powerCycle{0},startingCycle{0};
 std::string initialApn;
 bool powerPermitted() {
@@ -67,6 +68,30 @@ public:
         bool powered=false,announced=false;
         uint32_t observedCycle=powerCycle.load();
         for (;;) {
+            if(shutdownRequested.load() && !airplaneSuspended.load()) {
+                if(!shutdownStarted_) {
+                    shutdownStarted_=true;shutdownAt_=platform::millis();
+                    const bool safe=powered && linked_ && engine_.idle() && !tcp_.activeConnection();
+                    offline("Powering off cellular");
+                    rejectActions();
+                    if(safe) {
+                        send("AT+CPOF",[](const deck::AtResult&){cellSuspendForAirplane(true);},2000);
+                    } else {
+                        // Never put a new command into an SMS prompt or a
+                        // fixed-length TCP payload. Cancel and remove its rail.
+                        engine_.reset("Power off; previous result unknown");
+                        cellSuspendForAirplane(true);
+                    }
+                }
+                if(!airplaneSuspended.load()) {
+                    engine_.tick(platform::millis());
+                    while(platform::modemUart.available())engine_.feed(char(platform::modemUart.read()));
+                    rejectActions();
+                    if(uint32_t(platform::millis()-shutdownAt_)>=2500)cellSuspendForAirplane(true);
+                    vTaskDelay(pdMS_TO_TICKS(5));
+                    continue;
+                }
+            }
             if(airplaneSuspended.load() || observedCycle!=powerCycle.load()) {
                 if(powered || !announced || observedCycle!=powerCycle.load()) {
                     board::stopModemPower();
@@ -652,6 +677,8 @@ private:
     bool scanRequired_=true, scanning_=false, scanAttempted_=false, callPollSoon_=false, hasPendingCall_=false;
     bool meScanRequired_=true,meScanAttempted_=false,meStorageAvailable_=true,nextScanMe_=false;
     bool meReadFailed_=false;
+    bool shutdownStarted_=false;
+    uint32_t shutdownAt_=0;
     bool apnPending_=false;
     int reg_=-1;
 };
@@ -665,6 +692,7 @@ void cellSuspendForAirplane(bool suspended) {
     cellTcpSuspendForAirplane(suspended);
 }
 bool cellAirplaneStopped(){return powerStopped.load();}
+void cellRequestPowerOff(){cellTcpSuspendForAirplane(true);shutdownRequested=true;}
 bool startCellTask(const char* savedApn) {
     initialApn=savedApn && deck::validApn(savedApn)?savedApn:"";
     cellEvents=xQueueCreate(24,sizeof(CellEvent));
