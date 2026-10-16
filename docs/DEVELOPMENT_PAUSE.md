@@ -9,6 +9,45 @@ This is a **work-in-progress source checkpoint**, not a tested release. The
 combined UI/Meshtastic/GPS/Airplane build has not been flashed or fully validated.
 The new Airplane mode is therefore **not installed on the bench device**.
 
+## Priority next feature: Settings → Power off
+
+Requested during the pause: the user must be able to power down from Settings
+without unplugging the battery. This is a requirement for resumed development;
+it has not been implemented or flashed, and development remains paused.
+
+Implementation requirements:
+
+- Add a clear **Power off** action in Settings with a brief confirm/cancel step.
+- Stop accepting new sends; finish or explicitly cancel current operations,
+  marking uncertain results accurately. Never replay a message, call or AI
+  request after waking. Complete pending NVS writes without erasing settings.
+- Stop cellular, Wi-Fi, Bluetooth, LoRa and GPS; turn off front/keyboard lights
+  and prepare remaining peripherals for the lowest supported power state.
+- Render a final "Powered off" screen before sleeping; e-paper retains its image.
+- Inspect the exact v1.1 schematic and power-management documentation, including
+  BQ25896 battery-disconnect/ship-mode and USB behavior. Determine whether true
+  electronic power-off is supported, or whether a coordinated deep-sleep state
+  is required. Do not label a sleep state as complete electrical isolation.
+- Provide a simple, reliable wake/power-on action with the battery still
+  connected. Verify the chosen physical button/wake source and avoid accidental
+  bootloader entry or immediate wake loops. Explain it briefly in the UI/docs.
+
+Acceptance tests after implementation:
+
+1. Confirm/cancel works by touch and keyboard, including stale-screen tap guards.
+2. Verify all radio drivers and power rails are inactive; measure battery current
+   after shutdown rather than assuming that a frozen screen means off.
+3. Test battery-only shutdown, shutdown while USB is attached, unplugging and
+   reconnecting USB, charging behavior, and the documented wake action.
+4. Repeat power-off/wake cycles; verify saved APN, Wi-Fi, provider key, radio
+   preferences and message history survive without exposing secrets.
+5. Test shutdown during scans, connection setup and an AI request; simulate SMS,
+   call and Mesh interruption without unapproved real sends/calls. No operation
+   may be replayed automatically on wake.
+6. Check failure handling, low-battery behavior and interaction with saved
+   Airplane mode. Keep boot/off behavior predictable and retain the existing
+   size, memory, input and radio safeguards.
+
 ## State of the work
 
 - Native ESP-IDF 5.4.0 / FreeRTOS migration is implemented. No Arduino framework,
