@@ -351,7 +351,7 @@ private:
     void networkQuery(const std::string& cmd) {
         static const char* allowed[]={"AT+CGDCONT?","AT+CGATT?","AT+CGACT?","AT+CNMP?",
             "AT+CNBP?","AT+CEER","AT+CEREG?","AT+CGREG?","AT+CEREG=?",
-            "AT+CFUN?","AT+CSQ","AT+COPS?","AT+CPSI?","AT+COPS=?"};
+            "AT+CFUN?","AT+CSQ","AT+COPS?","AT+CPSI?","AT+COPS=?","AT+CGSN"};
         bool accepted=false;
         for(const char* value:allowed) if(cmd==value) accepted=true;
         if(!accepted) {emit(CellEventKind::Trace,"Unsupported read-only modem query");return;}

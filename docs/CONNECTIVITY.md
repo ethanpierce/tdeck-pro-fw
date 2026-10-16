@@ -18,6 +18,8 @@ select a carrier or establish SMS, voice or mobile data. Other cellular actions
 must wait for the scan to finish.
 
 USB: `carriers` starts a scan; `carriers results` opens and prints cached results.
+`modem AT+CGSN` reads the cellular modem's IMEI over USB. It is queried only on
+request and is not included in boot diagnostics or companion status.
 
 ## Wi-Fi: Settings → W
 
