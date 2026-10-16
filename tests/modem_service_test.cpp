@@ -164,5 +164,38 @@ int main(){
         assert(started && entry && done && h.count["AT+COPS=?"]==1 && h.count["AT"]==1);
         std::cout<<"PASS on-device carrier scan reports start, parsed result, completion without reconnect\n";
     }
+    {
+        Harness h(20000);bool applied=false;
+        const std::string write="AT+CGDCONT=1,\"IPV4V6\",\"NXTGENPHONE\"";
+        h.custom=[&](const std::string& cmd,unsigned){
+            if(cmd=="AT+CGDCONT?") {
+                Serial1.feed(applied?"+CGDCONT: 1,\"IPV4V6\",\"NXTGENPHONE\"\r\nOK\r\n":
+                    "+CGDCONT: 1,\"IP\",\"old.apn\"\r\nOK\r\n");return true;
+            }
+            if(cmd==write)applied=true;
+            return false;
+        };
+        tickHook=[&]{if(current==500)h.request(CellActionKind::SetApn,"NXTGENPHONE");if(current==1000)h.action(CellActionKind::Restart);};
+        h.run();assert(h.count["AT+CFUN=1,1"]==1 && h.count["AT"]==2);
+        assert(h.smsReady() && applied && h.count[write]==1 && h.count["AT+CGDCONT?"]==2);
+        assert(h.totalPrefix("AT+CMGS=")==0 && h.totalPrefix("ATD")==0);
+        std::cout<<"PASS explicit modem restart reinitializes SIM and retains APN without sending messages\n";
+    }
+    {
+        Harness h(2000);
+        h.custom=[&](const std::string& cmd,unsigned){return !cmd.empty()&&cmd.back()=='\x1a';};
+        tickHook=[&]{if(current==500)h.action(CellActionKind::Sms,77);if(current==600)h.action(CellActionKind::Restart);};
+        h.run();assert(h.totalPrefix("AT+CMGS=")==1 && h.count["AT+CFUN=1,1"]==0);
+        bool refused=false;for(const auto& e:h.events())if(e.kind==CellEventKind::Trace&&std::string(e.text).find("Modem busy or offline; restart")!=std::string::npos)refused=true;
+        assert(refused);std::cout<<"PASS restart refuses to interrupt an SMS in progress\n";
+    }
+    {
+        Harness h(27000);
+        h.custom=[&](const std::string& cmd,unsigned){return cmd=="AT+CFUN=1,1";};
+        tickHook=[&]{if(current==500)h.action(CellActionKind::Restart);};
+        h.run();assert(h.count["AT+CFUN=1,1"]==1 && h.count["AT"]==2 && h.smsReady());
+        assert(h.totalPrefix("AT+CMGS=")==0 && h.totalPrefix("ATD")==0);
+        std::cout<<"PASS uncertain restart recovers the UART without automatically repeating the reset\n";
+    }
     vQueueDelete(cellEvents);vQueueDelete(cellActions);cellEvents=cellActions=nullptr;
 }

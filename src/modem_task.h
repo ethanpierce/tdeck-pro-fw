@@ -11,7 +11,7 @@ struct CellEvent {
     char peer[32] = {};
     char text[512] = {};
 };
-enum class CellActionKind : uint8_t { Refresh, Sms, Dial, Answer, Hangup, ReadInbox, SetApn, NetworkQuery, CarrierScan };
+enum class CellActionKind : uint8_t { Refresh, Sms, Dial, Answer, Hangup, ReadInbox, SetApn, NetworkQuery, CarrierScan, Restart };
 struct CellAction {
     CellActionKind kind;
     uint32_t id = 0;

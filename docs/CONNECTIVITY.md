@@ -20,6 +20,16 @@ must wait for the scan to finish.
 USB: `carriers` starts a scan; `carriers results` opens and prints cached results.
 `modem AT+CGSN` reads the cellular modem's IMEI over USB. It is queried only on
 request and is not included in boot diagnostics or companion status.
+`modem AT+CIMI` reads the SIM's IMSI on request; keep that identifier private.
+After swapping a SIM, `modem restart` requests one software restart of the
+cellular module and reinitializes its SIM, SMS setup and saved APN. It refuses
+while a call, SMS, scan or another command is active. A restart is never retried
+automatically. `diag` and Settings R refresh status without restarting the module.
+
+For an AT&T consumer LTE phone SIM, AT&T lists `NXTGENPHONE`; its data-device
+profile uses `Broadband`, and IoT plans may have a separately provisioned APN.
+Use the APN supplied for the SIM's plan. See [AT&T's data settings](https://www.att.com/support/article-modal/wireless/KM1062162/).
+An accepted APN does not establish network registration or device eligibility.
 
 ## Wi-Fi: Settings → W
 

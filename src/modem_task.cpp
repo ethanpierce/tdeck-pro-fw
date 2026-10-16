@@ -351,7 +351,7 @@ private:
     void networkQuery(const std::string& cmd) {
         static const char* allowed[]={"AT+CGDCONT?","AT+CGATT?","AT+CGACT?","AT+CNMP?",
             "AT+CNBP?","AT+CEER","AT+CEREG?","AT+CGREG?","AT+CEREG=?",
-            "AT+CFUN?","AT+CSQ","AT+COPS?","AT+CPSI?","AT+COPS=?","AT+CGSN"};
+            "AT+CFUN?","AT+CSQ","AT+COPS?","AT+CPSI?","AT+COPS=?","AT+CGSN","AT+CIMI"};
         bool accepted=false;
         for(const char* value:allowed) if(cmd==value) accepted=true;
         if(!accepted) {emit(CellEventKind::Trace,"Unsupported read-only modem query");return;}
@@ -367,6 +367,17 @@ private:
         },cmd=="AT+COPS=?"?180000:10000);
     }
     void handle(const CellAction& a) {
+        if(a.kind==CellActionKind::Restart) {
+            if(!linked_ || configuring_ || !engine_.idle() || inCall_ || hasPendingCall_ || smsBusy_) {
+                emit(CellEventKind::Trace,"Modem busy or offline; restart again when idle");return;
+            }
+            emit(CellEventKind::Trace,"Restarting modem; waiting for SIM initialization");
+            send("AT+CFUN=1,1",[this](const deck::AtResult& r){
+                if(r.ok) offline("Modem restart accepted; reconnecting");
+                else if(!r.uncertain) emit(CellEventKind::Trace,"Modem restart failed: "+r.final);
+            },15000);
+            return;
+        }
         if(a.kind==CellActionKind::CarrierScan) {
             if(!linked_ || configuring_ || !engine_.idle() || inCall_ || hasPendingCall_ || smsBusy_) {
                 emit(CellEventKind::CarrierDone,"Modem busy or offline; retry shortly",0);return;
