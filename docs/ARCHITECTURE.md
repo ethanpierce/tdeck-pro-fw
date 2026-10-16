@@ -1,6 +1,6 @@
-# Starter architecture
+# Firmware architecture
 
-Handheld OS is ESP32-S3 firmware running on Arduino's FreeRTOS environment. It provides a small application shell suitable for bringing up this board's display, keyboard, cellular modem and LoRa radio. It does not boot Android or Linux.
+Handheld OS is ESP32-S3 firmware running native C/C++ on ESP-IDF 5.4 and FreeRTOS. It provides a small application shell suitable for bringing up this board's display, keyboard, cellular modem and LoRa radio. It does not boot Android or Linux.
 
 ```text
 USB console ─┐
@@ -17,12 +17,12 @@ TCA8418 keys ├── main loop / e-paper UI ─── NVS message ring
 
 ## Ownership and responsiveness
 
-`src/main.cpp` owns navigation, text entry, serial commands, display refresh requests and message updates. `src/board.cpp` owns the pin map and peripheral initialization. Keyboard and battery polling happen on the main task. The e-paper driver runs on that task too; partial refresh takes roughly 700 ms and typing is coalesced before redraw. A periodic full refresh reduces ghosting.
+`src/main.cpp` owns navigation, text entry, serial commands, display refresh requests and message updates. `src/board.cpp` owns the pin map and peripheral initialization. Keyboard and battery polling happen on the main task. The e-paper driver runs on that task too; the panel waveform takes roughly 700 ms per partial refresh. Navigation can redraw as soon as the panel is idle. Typing coalesces for 100 ms, with a 250 ms bound during a continuous burst; composer-only edits update its region. A busy callback queues physical keys during the blocking waveform, then applies them after drawing. Buffered keys retain their original capture times, avoiding an extra 100 ms quiet interval after a long frame. Queue overflow discards the batch and cancels the draft so a dropped key cannot accidentally submit it. A periodic full refresh reduces ghosting.
 
 The Messages launcher opens a unified conversation list. The host-testable
 conversation index groups numeric SMS peers with an optional leading `+`, keeps
 the latest original reply address and orders peers by their latest stored
-sequence. All radio messages share one Nearby LoRa broadcast thread; the UI adds
+sequence. All radio messages share one Meshtastic channel thread; the UI adds
 one AI thread separately. The index handles at most the newest 16 valid history
 records and bounded UTF-8 previews. It does not invent contacts, unread state or
 private radio conversations. Threads use an inline composer, a separate Send
@@ -33,7 +33,7 @@ CST3530 only after controller identification and a 240×320 resolution check.
 Bounded packets and coordinate validation live in `touch_packet.*`. The main
 loop uses press transitions for taps and discards touches received during a
 blocking redraw, preventing an old row from activating a newly drawn Send area.
-This implementation still needs physical touch/coordinate validation.
+The CST3530 Messages/AI/Send path passed on the earlier build; full coordinate/control coverage remains a bench check.
 
 `src/modem_task.cpp` creates a dedicated cellular task on core 0. It owns UART1 and the AT engine, allowing modem bytes and unsolicited events to be processed while the main loop waits for an e-paper refresh. The main loop sends typed actions through a bounded FreeRTOS queue, and receives compact cellular events through another bounded queue. `status` exposes a dropped-event counter, which should remain zero during ordinary operation.
 
@@ -41,11 +41,14 @@ This implementation still needs physical touch/coordinate validation.
 
 ## Host-testable core
 
-`lib/DeckCore/src/` has no Arduino dependency:
+The firmware and `lib/DeckCore/src/` have no Arduino dependency. The portable core contains:
 
 - `at_engine.*`: bounded AT command scheduling, prompt/payload handling, responses, timeouts and unsolicited event handling.
 - `sms_pdu.*`: number validation, single-part GSM-7 SMS submission encoding, supported SMS-DELIVER decoding and parsing helpers.
-- `radio_packet.*`: strict validation of the compact plaintext Handheld OS broadcast format.
+- `mesh_protocol.*`: bounded Meshtastic radio headers, protobuf Data/User payloads, channel/frequency selection and duplicate cache. The old `radio_packet.*` codec is retained for historical fixtures and the UI callback value type; the radio no longer accepts its plaintext format.
+- `nmea.*`: checksum-validated GNSS sentences, fresh position snapshots and explicit Google Maps links.
+- `radio_gate.h`: separate enable/suspension preferences and tickets that invalidate queued radio work.
+- `ui_layout.h`: shared touch geometry for the launcher, settings and numeric phone keypad.
 - `keyboard_decoder.*`: physical TCA8418 event decoding, modifiers and special keys.
 - `connectivity.*`: bounded carrier-scan parsing, Wi-Fi credential validation, BLE address validation, HID report-map parsing and keyboard report decoding.
 - `conversations.*`: bounded numeric-peer grouping, reply-address preservation, sequence ordering and UTF-8 previews.
@@ -53,11 +56,11 @@ This implementation still needs physical touch/coordinate validation.
 - `ai_protocol.*`: bounded provider requests, system prompt, response validation and the 500-character reply limit.
 - `cellular_http_protocol.*`: strict HEX decoding, modem clock parsing, HTTPS address validation and bounded HTTP response framing.
 
-`tools/test.sh` compiles these with warnings as errors and address/undefined-behavior sanitizers. `tests/core_test.cpp` provides regression fixtures. A second suite compiles the actual `src/message_store.cpp` against a host fake of Preferences to exercise retention, corrupted records, reset handling and write failures. A third runs the actual cellular-service loop against a fake UART, FreeRTOS queues and deterministic clock to check boot/SIM recovery, SMS uncertainty, call scheduling and inbox streaming. These tests validate parsing and state behavior; they cannot establish hardware pin timing, radio link quality, carrier support or voice audio.
+`tools/test.sh` compiles these with warnings as errors and address/undefined-behavior sanitizers. `tests/core_test.cpp` provides regression fixtures. A second suite compiles the actual `src/message_store.cpp` through the production native NVS adapter against an in-memory NVS boundary to exercise retention, corrupted records, reset handling and write failures. A third runs the actual cellular-service loop against a fake UART, FreeRTOS queues and deterministic clock to check boot/SIM recovery, SMS uncertainty, call scheduling and inbox streaming. These tests validate parsing and state behavior; they cannot establish hardware pin timing, radio link quality, carrier support or voice audio.
 
 ## Cellular behavior
 
-On startup the modem is powered and the firmware probes for an AT link. Offline probes retry without repeatedly pulsing PWRKEY. Once the link is established, command echo is disabled and verbose errors plus registration/caller indications are requested. PDU mode, SMS storage and inbox notifications are configured after `CPIN: READY`; transient setup failures are retried while the SIM is ready. Diagnostics query SIM, registration, signal and operator; full diagnostics also query model, firmware, function mode and serving system. The firmware does not place calls or send messages at boot.
+When Airplane mode is off, startup powers the modem and probes for an AT link. Offline probes retry without repeatedly pulsing PWRKEY. Once the link is established, command echo is disabled and verbose errors plus registration/caller indications are requested. PDU mode, SMS storage and inbox notifications are configured after `CPIN: READY`; transient setup failures are retried while the SIM is ready. Diagnostics query SIM, registration, signal and operator; full diagnostics also query model, firmware, function mode and serving system. The firmware does not place calls or send messages at boot.
 
 SMS storage prefers `SM/SM/ME`: default reads and stored-message sending use SIM,
 while new messages use modem memory, avoiding a full SIM's receiving limit.
@@ -116,6 +119,11 @@ through queues; the AI worker never reads or writes UART1. Requests retain
 ownership after caller timeouts so a late modem completion cannot access freed
 caller buffers, and expired queued jobs do not start stale network operations.
 
+Before opening a modem TCP socket, the broker queries its current TCP mode.
+When it is already mode 0, it avoids the redundant write that A7682E rejects
+while network service is open. This preserves warm multi-turn chat without
+resetting data service or replaying a request.
+
 The AT engine supports fixed-length binary transmit payloads without the SMS
 Ctrl-Z terminator. Socket reads request bounded HEX data, decode only the declared
 count and keep encrypted bytes containing AT-like text from becoming false
@@ -125,13 +133,13 @@ commands stay serialized; disruptive diagnostics/APN/network changes are refused
 during a transport lease. HTTP framing, body limits, authenticated close handling
 and secret-safe errors bound the response path. Host simulations cover framing,
 queued-job expiry, interleaved SMS notifications and reset cancellation; live
-LTE/TLS operation remains a hardware acceptance check.
+LTE/TLS operation passed on the earlier build with Wi-Fi disabled. Native-driver
+regression testing is recorded separately in the bench log.
 
 ## Wi-Fi and Bluetooth
 
-`src/wifi_service.cpp` runs asynchronous scans and polls station connection state
-on the main loop. `WiFi.persistent(false)` avoids a second framework credential
-store; a separate versioned/checksummed `wireless` record in `decksettings` holds
+`src/wifi_service.cpp` uses ESP-IDF Wi-Fi/IP events, asynchronous scans and
+main-loop polling. `WIFI_STORAGE_RAM` avoids a second SDK credential store; a separate versioned/checksummed `wireless` record in `decksettings` holds
 the selected network, credentials, enable switches and keyboard identity address.
 The original APN/light record is preserved across the upgrade. Passwords are
 masked and excluded from serial/BLE status output.
@@ -152,3 +160,51 @@ advertising was checked.
 `config/settings.h` supplies 915 MHz radio parameters, automatic board revision detection and modem baud. Ignored `config/local.h` may override defaults with `#define`. Pin changes belong in the board profile, with a reference to the matching schematic.
 
 Add future apps through the main UI once hardware bring-up is stable. Before expanding scope, choose how to handle message deletion/export, Unicode fonts, timekeeping, additional touch gestures, audio, power management and radio interoperability. A switch to Meshtastic or another stack requires integration of that stack and its protocol; changing a sync word alone does not provide compatibility.
+
+
+## Meshtastic leaf client
+
+`RadioService` replaces the old custom plaintext radio format with a bounded
+Meshtastic-compatible channel client. It uses the existing RadioLib native HAL,
+16-byte wire headers, a small protobuf codec and Mbed TLS AES-CTR. Sixteen heard
+nodes and 64 duplicate identities are retained in RAM. Only explicit text sends
+and explicit node announcements transmit; no relaying, automatic announcements,
+private PKI messages, remote administration, MQTT or delivery acknowledgements
+are implemented. Region selection and enabling are required before RF starts.
+The default channel key is public and provides no privacy. Source pins,
+compatibility fixtures and the need for a physical peer test are recorded in
+[MESH.md](MESH.md).
+
+## Location and sharing
+
+`GpsService` owns receive-only UART2 and the separate GNSS power rail. It starts
+off unless the saved user preference enables it and Airplane mode is off.
+Checksum-validated bounded NMEA sentences provide coordinates, fix state, UTC,
+satellites and available accuracy information. Stale or missing fixes cannot
+create sharing links. Location sharing creates an SMS draft containing a
+Google Maps coordinate link; choosing a recipient and pressing Send remain
+explicit user actions. Coordinates are not automatically persisted, logged,
+broadcast to mesh peers or sent to a server. See [GPS.md](GPS.md).
+
+## Airplane mode
+
+`airplane_mode.*` applies suspension before any service can start at boot.
+Independent gates prevent Wi-Fi scans/reconnects, BLE advertising/connections,
+mesh initialization/transmission, cellular commands and GNSS power while it is
+on. Actual driver/rail acknowledgements control the shutdown status. Wi-Fi and
+BLE preferences survive suspension; GPS and mesh restore only their saved
+preferences. Disabling Airplane mode never replays interrupted messages,
+provider requests or calls.
+
+The modem worker receives its power-off request independently of the action
+queue, so a long scan cannot delay it. Startup waits are interruptible. A
+power-cycle generation also discards queued actions across a rapid on/off
+toggle. Active SMS results become unknown rather than being resent. AI requests
+carry a matching generation, so a request queued before suspension cannot be
+submitted after connectivity returns.
+
+The new radio-policy and mesh settings use separate versioned/checksummed blobs.
+Existing light/APN, wireless, message and AI credential layouts remain unchanged.
+A damaged saved radio policy fails closed to Airplane mode. Turning Airplane
+mode on still stops the radios if saving the preference fails; the UI reports
+that the setting was not saved.

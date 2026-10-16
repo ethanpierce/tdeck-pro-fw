@@ -1,11 +1,19 @@
-#include <Arduino.h>
-#include <Wire.h>
+#include <platform.h>
+#include "native_text.h"
+#include "native_screen.h"
+#include <nvs_flash.h>
+#include <esp_system.h>
 #include <at_engine.h>
 #include <sms_pdu.h>
 #include <apn.h>
 #include <connectivity.h>
 #include <conversations.h>
 #include <ai_models.h>
+#include <ui_input.h>
+#include <ui_layout.h>
+#include <chat_lines.h>
+#include "gps_service.h"
+#include "airplane_mode.h"
 #include "wifi_service.h"
 #include "ble_service.h"
 #include "ai_chat.h"
@@ -22,6 +30,9 @@
 #include <algorithm>
 #include <cstring>
 
+using platform::millis;
+using platform::delay;
+
 namespace {
 Keyboard keyboard;
 TouchInput touch;
@@ -31,26 +42,36 @@ DeviceSettings settings;
 WifiService wifi;
 AiSettings aiSettings;
 AiChat ai;
-unsigned conversationCursor=0,threadScroll=0,modelCursor=0;
+GpsService gps;
+unsigned conversationCursor=0,threadScroll=0,modelCursor=0,settingsCursor=0,homeCursor=0;
 constexpr unsigned ThreadRows=10;
-enum class Page { Home, Messages, SmsNumber, SmsThread, Phone, Radio, Diagnostics, Settings, Apn, Carriers, Wifi, WifiSsid, WifiPassword, WifiForget, Ble, BlePair, BleForget, Ai, AiSetup, AiModelPicker, AiEndpoint, AiModel, AiKey };
+enum class Page { Home, Messages, SmsNumber, SmsThread, Phone, Radio, Diagnostics, Settings, Connections, MessagingSettings, DisplaySettings, CellularSettings, MeshSettings, MeshRegion, MeshPreset, MeshChannel, MeshKey, MeshNodes, Location, Apn, Carriers, Wifi, WifiSsid, WifiPassword, WifiForget, Ble, BlePair, BleForget, Ai, AiSetup, AiModelPicker, AiEndpoint, AiModel, AiKey };
 Page page=Page::Home;
 Page threadReturn=Page::Messages;
 Page aiSetupReturn=Page::Home;
-bool dirty=true, cellTask=false, linked=false, simReady=false, smsConfigured=false;
+Page meshSetupReturn=Page::MessagingSettings;
+deck::UiRefreshState ui;
+deck::UiKeyBuffer<64> busyKeys;
+bool applyingBusyKey=false;uint32_t busyKeyTime=0;
+bool cellTask=false, linked=false, simReady=false, smsConfigured=false;
 int network=-1, signalDbm=0, battery=-1, callState=-1;
-uint32_t drawnAt=0, editedAt=0, batteryAt=0;
+uint32_t batteryAt=0,lastDrawMs=0,maxDrawMs=0,busyPollAt=0;
+unsigned frameQueuedKeys=0;
+Page renderedPage=Page::Home;
+unsigned renderedScroll=0;
 unsigned refreshes=0;
-String notice="Starting radios...", sim="Checking", operatorName="Unknown", systemInfo="Not queried";
-String call="Idle", caller, input, recipient;
-String serialLine;
-String selectedConversation="new",aiPending,aiTransport;
+Text notice="Starting radios...", sim="Checking", operatorName="Unknown", systemInfo="Not queried";
+Text call="Idle", caller, input, recipient,phoneFeedback;
+Text serialLine,pendingLocationText;
+uint32_t locationCapturedAt=0;
+Text selectedConversation="ai",aiPending,aiTransport;
 bool serialOverflow=false;
+uint32_t gpsUiAt=0;Text gpsUiSignature;bool gpsUiFix=false,gpsUiEnabled=false;
 std::vector<deck::CarrierNetwork> carriers;
 bool carrierScanning=false,wifiNeedsPassword=false,bleTask=false,bleActive=false,bleScanning=false;
 unsigned carrierOffset=0,wifiCursor=0,bleCursor=0;
-String carrierStatus="R scans nearby carriers",wifiName,bleStatus="Off",phoneStatus="Not connected",keyboardStatus="Not connected";
-struct BleRow {String name,address;uint8_t type;int rssi;bool hid;};
+Text carrierStatus="R scans nearby carriers",wifiName,bleStatus="Off",phoneStatus="Not connected",keyboardStatus="Not connected";
+struct BleRow {Text name,address;uint8_t type;int rssi;bool hid;};
 std::vector<BleRow> bleDevices;
 deck::HidKeyboardDecoder bleKeyboard;
 bool pairActive=false,forgetAllBonds=false;
@@ -59,6 +80,18 @@ uint16_t pairHandle=0;uint32_t pairPin=0,pairAt=0,bleStatusAt=0;
 void key(char c);
 unsigned threadLineCount();
 void touchAt(int x,int y);
+void sendConversation();
+bool radiosAllowed();
+void inform(const Text&);
+void shareLocation() {
+    if(!radiosAllowed())return;
+    const auto point=gps.snapshot();
+    std::string link;
+    if(!deck::gpsMapsLink(point,link)){inform("No fresh GPS fix. Go outdoors and try again.");return;}
+    pendingLocationText=point.utc[0]?Text("Location captured at ")+Text(point.utc)+"\n"+Text(link):Text("My captured location\n")+Text(link);locationCapturedAt=millis();page=Page::SmsNumber;input="";
+    inform("Choose a recipient, then review your location message.");
+}
+
 
 
 const char* pageName() {
@@ -67,6 +100,11 @@ const char* pageName() {
     case Page::SmsNumber:return "New SMS"; case Page::SmsThread:return "SMS conversation";
     case Page::Phone:return "Phone"; case Page::Radio:return "Radio";
     case Page::Diagnostics:return "Device status";case Page::Settings:return "Settings";
+    case Page::Connections:return "Connections";case Page::MessagingSettings:return "Messaging settings";
+    case Page::DisplaySettings:return "Display";case Page::CellularSettings:return "Cellular";
+    case Page::MeshSettings:return "Meshtastic";case Page::MeshRegion:return "Mesh region";
+    case Page::MeshPreset:return "Mesh preset";case Page::MeshChannel:return "Mesh channel";
+    case Page::MeshKey:return "Mesh channel key";case Page::MeshNodes:return "Heard nodes";case Page::Location:return "Location";
     case Page::Apn:return "APN editor";
     case Page::Carriers:return "Carrier scan";case Page::Wifi:return "Wi-Fi";
     case Page::WifiSsid:return "Wi-Fi SSID";case Page::WifiPassword:return "Wi-Fi password";
@@ -97,9 +135,16 @@ const char* deliveryName(Delivery d,Medium medium) {
     default:return "Result unknown";
     }
 }
-void changed() {dirty=true; editedAt=millis();}
-void inform(const String& text) { notice=text; Serial.println(text); changed(); }
-bool action(CellActionKind kind,uint32_t id=0,const String& peer="",const String& text="") {
+void changed(bool typing=false) {
+    ui.changed(typing && applyingBusyKey?busyKeyTime:millis(),typing);
+}
+void inform(const Text& text) { notice=text; platform::console.println(text); changed(); }
+bool radiosAllowed() {
+    if(!airplaneMode())return true;
+    inform("Airplane mode is on. Turn it off in Settings.");return false;
+}
+bool action(CellActionKind kind,uint32_t id=0,const Text& peer="",const Text& text="") {
+    if(airplaneMode() && kind!=CellActionKind::Hangup){inform("Airplane mode is on. Cellular is off.");return false;}
     if (!cellTask) {inform("Cellular task unavailable"); return false;}
     CellAction a{}; a.kind=kind; a.id=id;
     snprintf(a.peer,sizeof(a.peer),"%s",peer.c_str());
@@ -109,25 +154,27 @@ bool action(CellActionKind kind,uint32_t id=0,const String& peer="",const String
 }
 void printSettings() {
     const auto& value=settings.values();
-    Serial.printf("Settings: %s | APN: %s | Screen light: %s | Keyboard light: %s\n",
+    platform::console.printf("Settings: %s | APN: %s | Screen light: %s | Keyboard light: %s\n",
         settings.persistent?"saved on device":"storage unavailable",
         value.apn[0]?value.apn:"modem profile unchanged",
         board::revision11?(value.frontLight?"on":"off"):"not fitted",
         value.keyboardLight?"on":"off");
 }
-void openSettings() {page=Page::Settings;input="";changed();printSettings();}
+void openSettings() {page=Page::Settings;settingsCursor=0;input="";notice="";changed();printSettings();}
+void openCategory(Page target){page=target;settingsCursor=0;input="";notice="";changed();}
 bool inConversation(){return page==Page::SmsThread || page==Page::Radio || page==Page::Ai;}
-void openMessages(){page=Page::Messages;input="";threadScroll=0;changed();}
+void openMessages(){page=Page::Messages;input="";notice="";threadScroll=0;changed();}
 void openAi(Page back=Page::Home){threadReturn=back;page=Page::Ai;input="";threadScroll=0;changed();}
-void openRadio(Page back=Page::Home){threadReturn=back;page=Page::Radio;input="";threadScroll=0;changed();}
-void openSms(const String& peer){threadReturn=Page::Messages;recipient=peer;page=Page::SmsThread;input="";threadScroll=0;changed();}
+void openRadio(Page back=Page::Home){threadReturn=back;page=Page::Radio;input="";notice=radio.status();threadScroll=0;changed();}
+void openSms(const Text& peer){threadReturn=Page::Messages;recipient=peer;page=Page::SmsThread;input="";notice=linked && simReady?"":"Check cellular service before sending";threadScroll=0;changed();}
 void openAiSetup(Page back=Page::Home){aiSetupReturn=back;page=Page::AiSetup;input="";changed();}
-String aiConnectionText() {
-    String connection=ai.busy && aiTransport.length()?String("AI over ")+aiTransport:wifi.connected?String("Wi-Fi connected"):cellTcpReady()?String("LTE ready"):String("No data connection");
+Text aiConnectionText() {
+    Text connection=ai.busy && aiTransport.length()?Text("AI over ")+aiTransport:wifi.connected?Text("Wi-Fi connected"):cellTcpReady()?Text("LTE ready"):Text("No data connection");
     return connection+(aiSettings.values().key[0]?" / key saved":" / no key");
 }
-String aiStartHint() {
+Text aiStartHint() {
     const auto& value=aiSettings.values();
+    if(airplaneMode())return "Airplane mode is on. Turn it off in Settings.";
     if(!value.model[0])return "Choose a model in AI settings.";
     const auto url=deck::aiCompletionUrl(value.endpoint);
     const bool openAi=url.rfind("https://api.openai.com/",0)==0 || url.rfind("https://api.openai.com:443/",0)==0;
@@ -135,10 +182,10 @@ String aiStartHint() {
     if(!wifi.connected && !cellTcpReady())return "Connect Wi-Fi or check cellular service to chat.";
     return "Ready. Type a message below.";
 }
-String aiScreenStatus() {
+Text aiScreenStatus() {
     return ai.status=="Set endpoint, model and key in Settings > I"?aiStartHint():ai.status;
 }
-bool configureAi(AiSettings::Field field,const String& value,const char* marker) {
+bool configureAi(AiSettings::Field field,const Text& value,const char* marker) {
     if(field==AiSettings::Field::Key)keyboard.trace=false;
     if(ai.busy){inform("AI setup busy; wait for the request");return false;}
     if(!aiSettings.set(field,value.c_str())){inform("AI setup not saved; check the field or storage");return false;}
@@ -160,17 +207,19 @@ bool saveWireless(const WirelessOptions& value) {
 }
 void carrierScan() {
     page=Page::Carriers;changed();
-    if(carrierScanning)return;
+    if(carrierScanning || !radiosAllowed())return;
     if(action(CellActionKind::CarrierScan)){carrierScanning=true;carrierStatus="Scan requested...";}
 }
 void openWifi(){page=Page::Wifi;input="";wifiCursor=0;changed();}
 void wifiPower(bool enabled) {
+    if(!radiosAllowed())return;
     auto value=settings.wireless();value.wifiEnabled=enabled;
     if(saveWireless(value))wifi.configure(value);
     changed();
 }
-void scanWifi(){openWifi();if(!wifi.enabled)wifiPower(true);wifi.scan();}
-void connectWifi(const String& password) {
+void scanWifi(){openWifi();if(!radiosAllowed())return;if(!wifi.enabled)wifiPower(true);wifi.scan();}
+void connectWifi(const Text& password) {
+    if(!radiosAllowed())return;
     if((wifiNeedsPassword && password.isEmpty()) || !deck::validWifiCredentials(wifiName.c_str(),password.c_str())) {
         inform("Use 8-63 password characters or 64 hex digits");return;
     }
@@ -187,6 +236,7 @@ void forgetWifi() {
 }
 void openBle(){page=Page::Ble;input="";changed();}
 void blePower(bool enabled) {
+    if(!radiosAllowed())return;
     auto value=settings.wireless();value.bleEnabled=enabled;
     if(!bleTask){inform("Bluetooth task unavailable");return;}
     if(saveWireless(value)) {
@@ -195,6 +245,7 @@ void blePower(bool enabled) {
     }
 }
 bool bleAction(BleCommand command,const char* address="",uint8_t type=0) {
+    if(!radiosAllowed())return false;
     if(!bleActive){inform("Turn Bluetooth on first");return false;}
     if(!bleRequest(command,address,type)){inform("Bluetooth busy; retry shortly");return false;}
     return true;
@@ -205,6 +256,8 @@ void connectBleSelection() {
 }
 void cancelPair(){if(pairActive)bleRequest(BleCommand::CancelPair,"",0,0,pairHandle);pairActive=false;input="";}
 void forgetBle() {
+    if(!radiosAllowed())return;
+    if(!bleActive){inform("Turn Bluetooth on to forget pairing");return;}
     const auto old=settings.wireless();auto value=old;std::memset(value.keyboardAddress,0,sizeof(value.keyboardAddress));
     if(saveWireless(value))bleAction(forgetAllBonds?BleCommand::ForgetAll:BleCommand::ForgetKeyboard,old.keyboardAddress,old.keyboardAddressType);
     openBle();
@@ -229,11 +282,12 @@ void blePoll() {
         case BleEventKind::Keyboard:keyboardStatus=e.text;inform(e.text);break;
         case BleEventKind::RememberKeyboard: {
             auto value=settings.wireless();snprintf(value.keyboardAddress,sizeof(value.keyboardAddress),"%s",e.address);value.keyboardAddressType=e.addressType&1;
-            if(!saveWireless(value))inform("Keyboard works; address could not be saved");break;
+            if(!saveWireless(value))inform("Keyboard works; address could not be saved");
+            break;
         }
         case BleEventKind::Device: {
             auto found=std::find_if(bleDevices.begin(),bleDevices.end(),[&](const BleRow& row){return row.address==e.address && row.type==e.addressType;});
-            BleRow row{e.text[0]?String(e.text):String("Unnamed BLE device"),String(e.address),e.addressType,int(int16_t(e.handle)),bool(e.value)};
+            BleRow row{e.text[0]?Text(e.text):Text("Unnamed BLE device"),Text(e.address),e.addressType,int(int16_t(e.handle)),bool(e.value)};
             if(found!=bleDevices.end())*found=row;else if(bleDevices.size()<24)bleDevices.push_back(row);
             else if(row.hid){auto other=std::find_if(bleDevices.begin(),bleDevices.end(),[](const BleRow& r){return !r.hid;});if(other!=bleDevices.end())*other=row;}
             // Keep insertion order stable while selecting a device.
@@ -255,12 +309,12 @@ void blePoll() {
         bleRequest(BleCommand::Status,"",0,0,0,status,battery<0?0:battery);bleStatusAt=millis();
     }
 }
-void saveApn(const String& value) {
+void saveApn(const Text& value) {
     if(!deck::validApn(value.c_str())) {inform("Use an APN of 1-63 letters, digits, dots or hyphens");return;}
     auto options=settings.values();
     snprintf(options.apn,sizeof(options.apn),"%s",value.c_str());
     if(!settings.save(options)) {inform("Settings could not be saved");return;}
-    page=Page::Settings;
+    page=Page::CellularSettings;
     if(action(CellActionKind::SetApn,0,"",options.apn)) inform("APN saved; waiting for modem");
     else inform("APN saved; applies after restart");
     input="";
@@ -274,19 +328,31 @@ void saveLights(bool front,bool keyboardLight) {
     board::lights(front,keyboardLight);
     inform("Light settings saved");printSettings();
 }
-void smsSend(const String& number,const String& body) {
+void smsSend(const Text& number,const Text& body) {
+    if(!radiosAllowed())return;
     deck::SmsSubmit checked;
     if (!deck::encodeSms(number.c_str(),body.c_str(),checked)) {inform("Number or SMS invalid (160 GSM septets max)"); return;}
     uint32_t id=store.add(Medium::Sms,false,number.c_str(),body.c_str());
     if (!action(CellActionKind::Sms,id,number,body)) store.update(id,Delivery::Failed);
     else inform("SMS queued; waiting for modem result");
 }
-void radioSend(const String& body) {
-    std::vector<uint8_t> checked;
-    if (!deck::encodeRadio({radio.node,1,body.c_str()},checked)) {inform("Radio: use 1-160 printable ASCII characters"); return;}
-    uint32_t id=store.add(Medium::Radio,false,"Broadcast",body.c_str());
-    if (!radio.send(body.c_str(),id)) {store.update(id,Delivery::Failed); inform("Radio unavailable or transmitting");}
-    else inform("Radio transmitting...");
+void radioSend(const Text& body) {
+    if(!radiosAllowed())return;
+    if(!radio.ready){inform(radio.status());return;}
+    if(body.empty() || body.size()>deck::MeshTextLimit){inform("Use 1-160 characters for this channel");return;}
+    uint32_t id=store.add(Medium::Radio,false,settings.mesh().channel,body.c_str());
+    if(!radio.send(body,id)){store.update(id,Delivery::Failed);inform(radio.status());}
+    else inform("Sending to the channel...");
+}
+
+bool saveMesh(const deck::MeshOptions& options) {
+    if(!radiosAllowed())return false;
+    if(!deck::validMeshOptions(options)){inform("Check the channel settings");return false;}
+    if(!settings.saveMesh(options)){inform("Mesh settings could not be saved");return false;}
+    radio.configure(options);page=Page::MeshSettings;settingsCursor=0;input="";inform(radio.status());return true;
+}
+void usePublicMeshKey() {
+    auto options=settings.mesh();options.keyBytes=16;std::memset(options.psk,0,sizeof(options.psk));std::memcpy(options.psk,deck::MeshDefaultKey,16);saveMesh(options);
 }
 void home() {page=Page::Home;input="";threadScroll=0;changed();}
 void cellPoll() {
@@ -302,20 +368,20 @@ void cellPoll() {
         case CellEventKind::Signal:if(signalDbm!=e.value){signalDbm=e.value; changed();} break;
         case CellEventKind::Operator:if(operatorName!=e.text){operatorName=e.text; changed();} break;
         case CellEventKind::System:systemInfo=e.text; changed(); break;
-        case CellEventKind::Trace:Serial.println(e.text); break;
+        case CellEventKind::Trace:platform::console.println(e.text); break;
         case CellEventKind::ApnResult:inform(e.text); break;
         case CellEventKind::CarrierStart:carriers.clear();carrierOffset=0;carrierScanning=true;carrierStatus=e.text;changed();break;
         case CellEventKind::Carrier:if(carriers.size()<16)carriers.push_back({e.value,int(e.id),e.text,e.peer});changed();break;
         case CellEventKind::CarrierDone:carrierScanning=false;carrierStatus=e.text;inform(e.text);break;
         case CellEventKind::SmsIn:
-            if(store.add(Medium::Sms,true,e.peer,e.text,e.id)) inform(String("SMS from ")+e.peer);
+            if(store.add(Medium::Sms,true,e.peer,e.text,e.id)) inform(Text("SMS from ")+e.peer);
             break;
         case CellEventKind::SmsSent:store.update(e.id,Delivery::Submitted); inform(e.text); break;
         case CellEventKind::Failed:
             store.update(e.id,e.value?Delivery::Unknown:Delivery::Failed); inform(e.text); break;
         case CellEventKind::Call:
             if((e.value==4 || e.value==5) && callState<0 && !e.peer[0]) caller="";
-            call=e.text; callState=e.value; if(e.peer[0]) caller=e.peer;
+            call=e.text;phoneFeedback=e.text; callState=e.value; if(e.peer[0]) caller=e.peer;
             if(callState==4 || callState==5){page=Page::Phone; input="";}
             inform(call); break;
         }
@@ -323,45 +389,60 @@ void cellPoll() {
 }
 void printInbox() {
     for (const auto& m:store.messages()) {
-        Serial.printf("#%lu %s %s %s [%s]\n%s\n",(unsigned long)m.sequence,
+        platform::console.printf("#%lu %s %s %s [%s]\n%s\n",(unsigned long)m.sequence,
             m.medium==Medium::Sms?"SMS":"LoRa",m.incoming?"from":"to",m.peer,deliveryName(m.delivery,m.medium),m.text);
     }
 }
 void printStatus() {
-    Serial.printf("Page: %s | Keyboard: %s\n",pageName(),keyboard.ready?"ready":"unavailable");
-    Serial.printf("Touch: %s / %s\n",touch.ready?"ready":"unavailable",touch.model());
-    Serial.printf("Board: v1.%d | Battery: %d%% | Modem: %s | SIM: %s\n",board::revision11?1:0,battery,linked?"AT ready":"no response",sim.c_str());
-    Serial.printf("LTE: %s | RSSI: %d (0=unknown) | SMS setup: %s\n",networkName(),signalDbm,smsConfigured?"ready":"unavailable");
-    Serial.printf("Operator: %s\nCPSI: %s\nLoRa: %s %.1f MHz, node %08lX, error %d\n",operatorName.c_str(),systemInfo.c_str(),
+    platform::console.printf("Runtime: native ESP-IDF %s | Entry: app_main\n",esp_get_idf_version());
+    platform::console.printf("Page: %s | Keyboard: %s\n",pageName(),keyboard.ready?"ready":"unavailable");
+    platform::console.printf("Touch: %s / %s\n",touch.ready?"ready":"unavailable",touch.model());
+    platform::console.printf("Board: v1.%d | Battery: %d%% | Modem: %s | SIM: %s\n",board::revision11?1:0,battery,linked?"AT ready":"no response",sim.c_str());
+    platform::console.printf("LTE: %s | RSSI: %d (0=unknown) | SMS setup: %s\n",networkName(),signalDbm,smsConfigured?"ready":"unavailable");
+    platform::console.printf("Operator: %s\nCPSI: %s\nLoRa: %s %.1f MHz, node %08lX, error %d\n",operatorName.c_str(),systemInfo.c_str(),
         radio.ready?"ready":"unavailable",DECK_LORA_MHZ,(unsigned long)radio.node,radio.error);
-    Serial.printf("Message storage: %s | Dropped cellular events: %lu\n",store.persistent?"NVS":"RAM only",(unsigned long)droppedCellEvents.load());
-    Serial.println("US T-Mobile: A7682E lacks B2/B4/B12/B66/B71; B5 alone is not broad compatibility.");
+    platform::console.printf("Message storage: %s | Dropped cellular events: %lu\n",store.persistent?"NVS":"RAM only",(unsigned long)droppedCellEvents.load());
+    platform::console.println("US T-Mobile: A7682E lacks B2/B4/B12/B66/B71; B5 alone is not broad compatibility.");
     printSettings();
-    Serial.printf("Wi-Fi: %s | IP: %s | Saved network: %s\n",wifi.status.c_str(),wifi.address.c_str(),settings.wireless().ssid[0]?"yes":"no");
-    Serial.printf("BLE: %s | Phone: %s | Keyboard: %s | Dropped BLE events: %lu\n",bleStatus.c_str(),phoneStatus.c_str(),keyboardStatus.c_str(),(unsigned long)droppedBleEvents.load());
-    Serial.printf("Heap: %u free / %u minimum | PSRAM: %u free\n",ESP.getFreeHeap(),ESP.getMinFreeHeap(),ESP.getFreePsram());
-    Serial.printf("AI: %s | Key: %s | Setup storage: %s\n",ai.status.c_str(),aiSettings.values().key[0]?"saved (hidden)":"not set",aiSettings.persistent?"NVS":"unavailable");
+    platform::console.printf("Wi-Fi: %s | IP: %s | Saved network: %s\n",wifi.status.c_str(),wifi.address.c_str(),settings.wireless().ssid[0]?"yes":"no");
+    platform::console.printf("BLE: %s | Phone: %s | Keyboard: %s | Dropped BLE events: %lu\n",bleStatus.c_str(),phoneStatus.c_str(),keyboardStatus.c_str(),(unsigned long)droppedBleEvents.load());
+    platform::console.printf("Heap: %u free / %u minimum | PSRAM: %u free\n",unsigned(platform::freeHeap()),unsigned(platform::minimumFreeHeap()),unsigned(platform::freePsram()));
+    platform::console.printf("AI: %s | Key: %s | Setup storage: %s\n",ai.status.c_str(),aiSettings.values().key[0]?"saved (hidden)":"not set",aiSettings.persistent?"NVS":"unavailable");
+    platform::console.printf("Display: %lu ms last / %lu ms maximum | Keys buffered during last frame: %u | Dropped keys: %lu\n",
+        (unsigned long)lastDrawMs,(unsigned long)maxDrawMs,frameQueuedKeys,(unsigned long)busyKeys.dropped());
 }
 void help() {
-    Serial.println("Handheld OS 0.1 | Commands (USB 115200, newline):");
-    Serial.println("help | status | diag | settings | inbox | scan-sim | home | keys on | keys off");
-    Serial.println("apn <name> | light on/off | keyboard-light on/off | modem <read-only AT query>");
-    Serial.println("modem restart (restart cellular modem after changing SIM)");
-    Serial.println("modem auto (request automatic carrier registration; up to 3 minutes)");
-    Serial.println("carriers | wifi | wifi on/off/scan/forget | ble | ble on/off/scan/pair/reconnect | ble connect <1..24>");
-    Serial.println("ai | ai setup | ai clear | ai endpoint <https-base> | ai model <id> | ai key <secret> | ai clear-key");
-    Serial.println("sms +15551234567|Hello | dial +15551234567 | answer | hangup | lora Hello");
-    Serial.println("No messages/calls are sent at boot. LoRa is plaintext; no delivery acknowledgements.");
+    platform::console.println("Handheld OS 0.1 | Commands (USB 115200, newline):");
+    platform::console.println("help | status | diag | settings | inbox | scan-sim | home | keys on | keys off");
+    platform::console.println("apn <name> | light on/off | keyboard-light on/off | modem <read-only AT query>");
+    platform::console.println("modem restart (restart cellular modem after changing SIM)");
+    platform::console.println("modem auto (request automatic carrier registration; up to 3 minutes)");
+    platform::console.println("carriers | wifi | wifi on/off/scan/forget | ble | ble on/off/scan/pair/reconnect | ble connect <1..24>");
+    platform::console.println("ai | ai setup | ai clear | ai endpoint <https-base> | ai model <id> | ai key <secret> | ai clear-key");
+    platform::console.println("ai ask <message> (one real provider request using the saved setup)");
+    platform::console.println("airplane on | airplane off | airplane status");
+    platform::console.println("sms +15551234567|Hello | dial +15551234567 | answer | hangup | lora Hello");
+    platform::console.println("No messages/calls are sent at boot. LoRa is plaintext; no delivery acknowledgements.");
 }
-void command(String line) {
+void command(Text line) {
     line.trim();
     if(line=="help") help();
+    else if(line=="airplane status")platform::console.println(airplaneStatus());
+    else if(line=="airplane on" || line=="airplane off") {
+        setAirplaneMode(line=="airplane on");inform(airplaneStatus());
+    }
     else if(line=="status") printStatus();
     else if(line=="home") home();
     else if(line=="messages")openMessages();
     else if(line=="lora")openRadio();
     else if(line=="settings") openSettings();
     else if(line=="ai")openAi();
+    else if(line.startsWith("ai ask ")) {
+        if(ai.busy){inform("Wait for the current AI request");return;}
+        const Text prompt=line.substring(7);
+        if(!prompt.length() || prompt.length()>deck::AiPromptLimit){inform("Use 1-384 characters for AI");return;}
+        openAi();input=prompt;sendConversation();
+    }
     else if(line=="ai setup" || line=="ai settings")openAiSetup();
     else if(line=="ai clear"){ai.clear();threadScroll=0;changed();}
     else if(line.startsWith("ai endpoint "))configureAi(AiSettings::Field::Endpoint,line.substring(12),"AI endpoint saved");
@@ -371,13 +452,13 @@ void command(String line) {
     else if(line=="carriers")carrierScan();
     else if(line=="carriers results") {
         page=Page::Carriers;changed();
-        Serial.printf("Carrier scan: %s | %u results\n",carrierStatus.c_str(),unsigned(carriers.size()));
-        for(const auto& row:carriers)Serial.printf("Carrier: %s | %s | state %d | RAT %d\n",row.name.c_str(),row.code.c_str(),row.status,row.technology);
+        platform::console.printf("Carrier scan: %s | %u results\n",carrierStatus.c_str(),unsigned(carriers.size()));
+        for(const auto& row:carriers)platform::console.printf("Carrier: %s | %s | state %d | RAT %d\n",row.name.c_str(),row.code.c_str(),row.status,row.technology);
     }
     else if(line=="wifi")openWifi();
     else if(line=="wifi scan")scanWifi();
     else if(line=="wifi networks") {
-        for(unsigned i=0;i<wifi.networks.size();++i)Serial.printf("Wi-Fi %u: %s | %d dBm | %s\n",i+1,wifi.networks[i].ssid.c_str(),wifi.networks[i].rssi,wifi.networks[i].auth==WIFI_AUTH_OPEN?"open":"secured");
+        for(unsigned i=0;i<wifi.networks.size();++i)platform::console.printf("Wi-Fi %u: %s | %d dBm | %s\n",i+1,wifi.networks[i].ssid.c_str(),wifi.networks[i].rssi,wifi.networks[i].auth==WIFI_AUTH_OPEN?"open":"secured");
     }
     else if(line=="wifi on" || line=="wifi off")wifiPower(line=="wifi on");
     else if(line=="wifi forget")forgetWifi();
@@ -385,7 +466,7 @@ void command(String line) {
     else if(line=="ble on" || line=="ble off")blePower(line=="ble on");
     else if(line=="ble scan"){openBle();bleAction(BleCommand::Scan);}
     else if(line=="ble devices") {
-        for(unsigned i=0;i<bleDevices.size();++i)Serial.printf("BLE %u: %s | %d dBm | %s | %s\n",i+1,bleDevices[i].name.c_str(),bleDevices[i].rssi,bleDevices[i].hid?"HID candidate":"BLE device",bleDevices[i].address.c_str());
+        for(unsigned i=0;i<bleDevices.size();++i)platform::console.printf("BLE %u: %s | %d dBm | %s | %s\n",i+1,bleDevices[i].name.c_str(),bleDevices[i].rssi,bleDevices[i].hid?"HID candidate":"BLE device",bleDevices[i].address.c_str());
     }
     else if(line=="ble pair"){openBle();bleAction(BleCommand::Advertise);}
     else if(line=="ble reconnect"){const auto& v=settings.wireless();bleAction(BleCommand::Connect,v.keyboardAddress,v.keyboardAddressType);}
@@ -399,12 +480,12 @@ void command(String line) {
     else if(line=="diag") {action(CellActionKind::Refresh); inform("Diagnostics requested; watch USB output");}
     else if(line=="inbox") printInbox();
     else if(line=="scan-sim") action(CellActionKind::ReadInbox);
-    else if(line=="keys on") {if(page==Page::AiKey){keyboard.trace=false;inform("Keyboard trace unavailable during secret entry");}else{keyboard.trace=true;inform("Raw keyboard event trace on");}}
+    else if(line=="keys on") {if(page==Page::AiKey || page==Page::MeshKey || page==Page::WifiPassword){keyboard.trace=false;inform("Keyboard trace unavailable during secret entry");}else{keyboard.trace=true;inform("Raw keyboard event trace on");}}
     else if(line=="keys off") keyboard.trace=false;
     else if(line=="answer") action(CellActionKind::Answer);
     else if(line=="hangup") action(CellActionKind::Hangup);
     else if(line.startsWith("dial ")) {
-        String number=line.substring(5);
+        Text number=line.substring(5);
         if(deck::phoneNumber(number.c_str())) action(CellActionKind::Dial,0,number);
         else inform("Invalid phone number");
     } else if(line.startsWith("lora ")) radioSend(line.substring(5));
@@ -415,8 +496,8 @@ void command(String line) {
     } else if(line.length()) inform("Unknown command; type help");
 }
 void serialPoll() {
-    while(Serial.available()) {
-        char c=char(Serial.read());
+    while(platform::console.available()) {
+        char c=char(platform::console.read());
         if(c=='\r') continue;
         if(c=='\n') {
             if(serialOverflow) inform("Command too long; discarded"); else command(serialLine);
@@ -426,17 +507,16 @@ void serialPoll() {
     }
 }
 enum class ConversationType {NewSms,Ai,Radio,Sms};
-struct ConversationRow {ConversationType type;String key,title,preview,peer;};
+struct ConversationRow {ConversationType type;Text key,title,preview,peer;};
 std::vector<ConversationRow> conversationRows() {
     std::vector<deck::ConversationMessage> messages;
     for(const auto& m:store.messages())messages.push_back({m.medium==Medium::Radio,m.sequence,m.peer,m.text});
     const auto indexed=deck::conversationIndex(messages);
-    String aiPreview=ai.busy?"Thinking...":ai.messages().empty()?String(aiSettings.values().model):String(ai.messages().back().text.c_str());
-    std::vector<ConversationRow> rows={{ConversationType::NewSms,"new","New message","Send an SMS to a phone number",""},
-        {ConversationType::Ai,"ai","AI Assistant",aiPreview,""},
-        {ConversationType::Radio,"lora:broadcast","Nearby LoRa","Shared nearby broadcast conversation",""}};
+    Text aiPreview=ai.busy?"Thinking...":ai.messages().empty()?Text(aiSettings.values().model):Text(ai.messages().back().text.c_str());
+    std::vector<ConversationRow> rows={{ConversationType::Ai,"ai","AI Assistant",aiPreview,""},
+        {ConversationType::Radio,"lora:broadcast","Meshtastic","Channel conversation",""}};
     for(const auto& row:indexed) {
-        if(row.kind==deck::ConversationKind::NearbyLoRa)rows[2].preview=row.preview.c_str();
+        if(row.kind==deck::ConversationKind::NearbyLoRa)rows[1].preview=row.preview.c_str();
         else rows.push_back({ConversationType::Sms,row.key.c_str(),row.replyAddress.c_str(),row.preview.c_str(),row.replyAddress.c_str()});
     }
     return rows;
@@ -453,10 +533,10 @@ void chooseConversation() {
     else openSms(row.peer);
 }
 void sendConversation() {
-    if(input.isEmpty())return;
+    if(input.isEmpty() || !radiosAllowed())return;
     if(page==Page::Ai) {
         if(!ai.send(aiSettings.values(),input)){changed();return;}
-        aiPending=input;aiTransport=ai.status.indexOf("LTE")>=0?"LTE":"Wi-Fi";
+        aiPending=input;aiTransport=ai.status.find("LTE")!=std::string::npos?"LTE":"Wi-Fi";
     } else if(page==Page::SmsThread) {
         deck::SmsSubmit checked;
         if(!deck::encodeSms(recipient.c_str(),input.c_str(),checked)){inform("This message exceeds one GSM-7 SMS");return;}
@@ -469,37 +549,98 @@ void key(char c) {
     if(c==27){
         cancelPair();
         if(inConversation()){if(threadReturn==Page::Messages)openMessages();else home();}
-        else if(page==Page::SmsNumber)openMessages();
+        else if(page==Page::SmsNumber){const bool location=pendingLocationText.length();pendingLocationText="";if(location)openCategory(Page::Location);else openMessages();}
         else if(page==Page::AiModelPicker || page==Page::AiEndpoint || page==Page::AiModel || page==Page::AiKey)openAiSetup(aiSetupReturn);
-        else if(page==Page::AiSetup){if(aiSetupReturn==Page::Ai)openAi(threadReturn);else if(aiSetupReturn==Page::Settings)openSettings();else home();}
-        else home();
+        else if(page==Page::AiSetup){if(aiSetupReturn==Page::Ai)openAi(threadReturn);else if(aiSetupReturn==Page::MessagingSettings)openCategory(Page::MessagingSettings);else openSettings();}
+        else if(page==Page::Connections || page==Page::MessagingSettings || page==Page::DisplaySettings || page==Page::Location || page==Page::Diagnostics)openSettings();
+        else if(page==Page::Wifi || page==Page::Ble || page==Page::CellularSettings)openCategory(Page::Connections);
+        else if(page==Page::MeshSettings){if(meshSetupReturn==Page::Radio)openRadio(threadReturn);else openCategory(Page::MessagingSettings);}
+        else if(page==Page::MeshRegion || page==Page::MeshPreset || page==Page::MeshChannel || page==Page::MeshKey || page==Page::MeshNodes)openCategory(Page::MeshSettings);
+        else if(page==Page::Apn || page==Page::Carriers)openCategory(Page::CellularSettings);
+        else if(page==Page::WifiSsid || page==Page::WifiPassword || page==Page::WifiForget)openWifi();
+        else if(page==Page::BleForget)openBle();else home();
         return;
     }
     if(page==Page::Home) {
-        if(c=='m') {openMessages();return;}
-        if(c=='p') page=Page::Phone;
-        if(c=='l') {openRadio();return;}
-        if(c=='d') page=Page::Diagnostics;
-        if(c=='s') {openSettings();return;}
-        if(c=='a') {openAi();return;}
-        input="";changed();return;
+        if(c=='j' || c==18){homeCursor=(homeCursor+1)%3;changed();return;}
+        if(c=='k' || c==17){homeCursor=(homeCursor+2)%3;changed();return;}
+        if(c=='\r' || c=='\n')c="mps"[homeCursor];
+        if(c=='m'){openMessages();return;}if(c=='s'){openSettings();return;}
+        if(c=='p'){page=Page::Phone;input="";changed();return;}
+        if(c=='l'){openRadio();return;}if(c=='a'){openAi();return;}
+        if(c=='d'){openCategory(Page::Diagnostics);return;}return;
     }
-    if(page==Page::Settings) {
-        const auto& value=settings.values();
-        if(c=='a') {input=value.apn[0]?value.apn:"fast.t-mobile.com";page=Page::Apn;changed();}
-        else if(c=='f') {
-            if(board::revision11) saveLights(!value.frontLight,value.keyboardLight);
-            else inform("Screen light is not fitted on this revision");
-        } else if(c=='k') saveLights(value.frontLight,!value.keyboardLight);
-        else if(c=='c')carrierScan();
-        else if(c=='w')openWifi();
-        else if(c=='b')openBle();
-        else if(c=='i')openAiSetup(Page::Settings);
-        else if(c=='d') {page=Page::Diagnostics;changed();}
-        else if(c=='r') {action(CellActionKind::Refresh);inform("Refreshing modem status");}
+    if(page==Page::Settings || page==Page::Connections || page==Page::MessagingSettings || page==Page::DisplaySettings || page==Page::CellularSettings) {
+        const unsigned count=page==Page::Settings?6:page==Page::Connections?3:page==Page::MessagingSettings?2:page==Page::DisplaySettings?2:3;
+        const char* shortcuts=page==Page::Settings?"acmdli":page==Page::Connections?"wbc":page==Page::MessagingSettings?"im":page==Page::DisplaySettings?"fk":"acr";
+        if(c=='j' || c==18){settingsCursor=(settingsCursor+1)%count;changed();return;}
+        if(c=='k' || c==17){settingsCursor=(settingsCursor+count-1)%count;changed();return;}
+        if(c=='\r' || c=='\n')c=shortcuts[settingsCursor];
+        if(page==Page::Settings){
+            if(c=='a'){setAirplaneMode(!airplaneMode());inform(airplaneStatus());}
+            else if(c=='c')openCategory(Page::Connections);else if(c=='m')openCategory(Page::MessagingSettings);
+            else if(c=='d')openCategory(Page::DisplaySettings);else if(c=='l')openCategory(Page::Location);else if(c=='i')openCategory(Page::Diagnostics);
+        } else if(page==Page::Connections){if(c=='w')openWifi();else if(c=='b')openBle();else if(c=='c')openCategory(Page::CellularSettings);}
+        else if(page==Page::MessagingSettings){if(c=='i')openAiSetup(Page::MessagingSettings);else if(c=='m'){meshSetupReturn=Page::MessagingSettings;openCategory(Page::MeshSettings);}}
+        else if(page==Page::DisplaySettings){const auto& v=settings.values();if(c=='f')saveLights(!v.frontLight,v.keyboardLight);else if(c=='k')saveLights(v.frontLight,!v.keyboardLight);}
+        else {if(!radiosAllowed())return;if(c=='a'){input=settings.values().apn;page=Page::Apn;changed();}else if(c=='c')carrierScan();else if(c=='r'){action(CellActionKind::Refresh);inform("Refreshing cellular status");}}
+        return;
+    }
+    if(page==Page::MeshSettings) {
+        if(c=='j' || c==18){settingsCursor=(settingsCursor+1)%6;changed();return;}
+        if(c=='k' || c==17){settingsCursor=(settingsCursor+5)%6;changed();return;}
+        if(c=='\r' || c=='\n')c="mrpcnk"[settingsCursor];
+        if(!radiosAllowed())return;
+        auto options=settings.mesh();
+        if(c=='m'){if(!options.enabled && options.region==deck::MeshRegion::Unset){inform("Choose your region before turning Meshtastic on");return;}options.enabled=!options.enabled;saveMesh(options);}
+        else if(c=='r'){openCategory(Page::MeshRegion);settingsCursor=options.region==deck::MeshRegion::US?1:0;}
+        else if(c=='p'){openCategory(Page::MeshPreset);settingsCursor=unsigned(options.preset);}
+        else if(c=='c'){openCategory(Page::MeshChannel);input=options.channel;}
+        else if(c=='n')openCategory(Page::MeshNodes);
+        else if(c=='k'){keyboard.trace=false;openCategory(Page::MeshKey);}
+        return;
+    }
+    if(page==Page::MeshRegion || page==Page::MeshPreset) {
+        const unsigned count=page==Page::MeshRegion?2:3;
+        if(c=='j' || c==18){settingsCursor=(settingsCursor+1)%count;changed();return;}
+        if(c=='k' || c==17){settingsCursor=(settingsCursor+count-1)%count;changed();return;}
+        if(c=='\r' || c=='\n'){auto options=settings.mesh();if(page==Page::MeshRegion){options.region=settingsCursor?deck::MeshRegion::US:deck::MeshRegion::Unset;if(!settingsCursor)options.enabled=0;}else {const bool defaultName=!std::strcmp(options.channel,deck::meshPresetName(options.preset));options.preset=deck::MeshPreset(settingsCursor);if(defaultName)snprintf(options.channel,sizeof(options.channel),"%s",deck::meshPresetName(options.preset));}saveMesh(options);}
+        return;
+    }
+    if(page==Page::MeshChannel || page==Page::MeshKey) {
+        if(c=='\b'){if(input.length())input.remove(input.length()-1);changed(true);}
+        else if(c=='\r' || c=='\n') {
+            auto options=settings.mesh();
+            if(page==Page::MeshChannel){if(input.empty()){inform("Enter a channel name");return;}std::memset(options.channel,0,sizeof(options.channel));std::memcpy(options.channel,input.data(),input.size());}
+            else {
+                if(input.empty()){openCategory(Page::MeshSettings);return;}
+                if(input.size()!=32 && input.size()!=64){inform("Use 32 or 64 hexadecimal characters");return;}
+                auto nibble=[](char v)->int{return v>='0' && v<='9'?v-'0':v>='a' && v<='f'?v-'a'+10:v>='A' && v<='F'?v-'A'+10:-1;};
+                std::memset(options.psk,0,sizeof(options.psk));options.keyBytes=input.size()/2;
+                for(unsigned n=0;n<options.keyBytes;++n){const int hi=nibble(input[n*2]),lo=nibble(input[n*2+1]);if(hi<0 || lo<0){inform("Use hexadecimal digits only");return;}options.psk[n]=uint8_t((hi<<4)|lo);}
+            }
+            saveMesh(options);
+        } else if(c>=32 && c<=126 && input.length()<(page==Page::MeshChannel?11:64)){input+=c;changed(true);}
+        return;
+    }
+    if(page==Page::MeshNodes) {
+        if(c=='a'){if(radiosAllowed()){if(!radio.announce())inform(radio.status());else inform("Announcing this device...");}}
+        else if(c=='j' || c==18){settingsCursor=std::min(settingsCursor+1,3u);changed();}
+        else if(c=='k' || c==17){if(settingsCursor)--settingsCursor;changed();}
+        return;
+    }
+    if(page==Page::Location) {
+        if(c=='g') {
+            if(!radiosAllowed())return;
+            auto options=settings.radios();options.gpsEnabled=!options.gpsEnabled;
+            if(options.gpsEnabled && !radiosAllowed())return;
+            if(!settings.saveRadios(options)){inform("GPS setting could not be saved");return;}
+            gps.configure(options.gpsEnabled);inform(gps.snapshot().status);
+        } else if(c=='s')shareLocation();
         return;
     }
     if(page==Page::Messages) {
+        if(c=='n'){pendingLocationText="";page=Page::SmsNumber;input="";changed();return;}
         const auto rows=conversationRows();syncConversation(rows);
         if((c=='j' || c==18) && conversationCursor+1<rows.size())++conversationCursor;
         else if((c=='k' || c==17) && conversationCursor)--conversationCursor;
@@ -510,8 +651,8 @@ void key(char c) {
         if(c==17){const unsigned count=threadLineCount();const unsigned max=count>ThreadRows?count-ThreadRows:0;threadScroll=std::min(threadScroll+ThreadRows,max);changed();}
         else if(c==18){threadScroll=threadScroll>ThreadRows?threadScroll-ThreadRows:0;changed();}
         else if(c=='\r' || c=='\n')sendConversation();
-        else if(c=='\b'){if(input.length())input.remove(input.length()-1);changed();}
-        else if(c>=32 && c<=126 && input.length()<(page==Page::Ai?deck::AiPromptLimit:160)){input+=c;threadScroll=0;changed();}
+        else if(c=='\b'){if(input.length())input.remove(input.length()-1);changed(true);}
+        else if(c>=32 && c<=126 && input.length()<(page==Page::Ai?deck::AiPromptLimit:160)){input+=c;threadScroll=0;changed(true);}
         return;
     }
     if(page==Page::AiSetup) {
@@ -535,10 +676,10 @@ void key(char c) {
     }
     if(page==Page::AiEndpoint || page==Page::AiModel || page==Page::AiKey) {
         const size_t limit=page==Page::AiEndpoint?191:page==Page::AiModel?95:255;
-        if(c=='\b'){if(input.length())input.remove(input.length()-1);changed();}
+        if(c=='\b'){if(input.length())input.remove(input.length()-1);changed(true);}
         else if(c=='\r' || c=='\n') {
             saveAiField();
-        } else if(c>=32 && c<=126 && input.length()<limit){input+=c;changed();}
+        } else if(c>=32 && c<=126 && input.length()<limit){input+=c;changed(true);}
         return;
     }
     if(page==Page::Carriers) {
@@ -559,16 +700,16 @@ void key(char c) {
             if(!WifiService::supported(row.auth)){inform("This Wi-Fi security type is unsupported");return;}
             wifiName=row.ssid;wifiNeedsPassword=row.auth!=WIFI_AUTH_OPEN;
             if(!wifiNeedsPassword)connectWifi("");
-            else {input=wifiName==settings.wireless().ssid?String(settings.wireless().password):String("");page=Page::WifiPassword;changed();}
+            else {input=wifiName==settings.wireless().ssid?Text(settings.wireless().password):Text("");page=Page::WifiPassword;keyboard.trace=false;changed();}
         }
         return;
     }
     if(page==Page::WifiSsid || page==Page::WifiPassword) {
-        if(c=='\b'){if(input.length())input.remove(input.length()-1);changed();}
+        if(c=='\b'){if(input.length())input.remove(input.length()-1);changed(true);}
         else if(c=='\r' || c=='\n') {
-            if(page==Page::WifiSsid) {if(input.isEmpty())return;wifiName=input;input="";wifiNeedsPassword=false;page=Page::WifiPassword;changed();}
+            if(page==Page::WifiSsid) {if(input.isEmpty())return;wifiName=input;input="";wifiNeedsPassword=false;page=Page::WifiPassword;keyboard.trace=false;changed();}
             else connectWifi(input);
-        } else if(c>=32 && c<=126 && input.length()<(page==Page::WifiSsid?32:64)){input+=c;changed();}
+        } else if(c>=32 && c<=126 && input.length()<(page==Page::WifiSsid?32:64)){input+=c;changed(true);}
         return;
     }
     if(page==Page::WifiForget){if(c=='y')forgetWifi();else if(c=='n')openWifi();return;}
@@ -588,34 +729,41 @@ void key(char c) {
         if(pairMode==BleEventKind::PairConfirm && (c=='y' || c=='n')) {
             bleRequest(BleCommand::Confirm,"",0,c=='y',pairHandle);if(c=='n'){pairActive=false;openBle();}else inform("Pairing confirmation sent");
         } else if(pairMode==BleEventKind::PairEntry) {
-            if(c=='\b'){if(input.length())input.remove(input.length()-1);changed();}
+            if(c=='\b'){if(input.length())input.remove(input.length()-1);changed(true);}
             else if((c=='\r' || c=='\n') && input.length()==6){bleRequest(BleCommand::Passkey,"",0,input.toInt(),pairHandle);input="";inform("Passkey sent");}
             else {
                 const char* digits="wersdfzxcp";const char* mapped=strchr(digits,c);if(mapped)c=mapped-digits==9?'0':char('1'+mapped-digits);
-                if(c>='0' && c<='9' && input.length()<6){input+=c;changed();}
+                if(c>='0' && c<='9' && input.length()<6){input+=c;changed(true);}
             }
         }
         return;
     }
     if(page==Page::Apn) {
-        if(c=='\b') {if(input.length())input.remove(input.length()-1);changed();}
+        if(c=='\b') {if(input.length())input.remove(input.length()-1);changed(true);}
         else if(c=='\r' || c=='\n') saveApn(input);
-        else if(c>=32 && c<=126 && input.length()<63) {input+=c;changed();}
+        else if(c>=32 && c<=126 && input.length()<63) {input+=c;changed(true);}
         return;
     }
     if(page==Page::Diagnostics) {if(c=='r') action(CellActionKind::Refresh); if(c=='i') action(CellActionKind::ReadInbox); return;}
-    if(page==Page::Phone && (callState>=0 || input.isEmpty())) {
-        if(c=='a' && callState>=0){action(CellActionKind::Answer);return;}
-        if(c=='h' && callState>=0){action(CellActionKind::Hangup);return;}
+    if(page==Page::Phone) {
+        if((c=='a' || c=='\r' || c=='\n') && (callState==4 || callState==5)){action(CellActionKind::Answer);return;}
+        if(c=='h' && callState>=0){if(action(CellActionKind::Hangup))phoneFeedback="Ending call...";else phoneFeedback=notice;return;}
     }
-    if(c=='\b') {if(input.length())input.remove(input.length()-1);changed();return;}
+    if(c=='\b') {if(input.length())input.remove(input.length()-1);changed(true);return;}
     if(c=='\r' || c=='\n') {
         if(page==Page::SmsNumber) {
-            if(deck::phoneNumber(input.c_str())) {String peer=input;openSms(peer);}
+            if(deck::phoneNumber(input.c_str())) {
+                if(pendingLocationText.length() && uint32_t(millis()-locationCapturedAt)>30000){inform("GPS fix expired. Share again from Location.");return;}
+                Text peer=input;openSms(peer);
+                if(pendingLocationText.length()){input=pendingLocationText;pendingLocationText="";inform("Review the location link. Send when ready.");}
+            }
             else inform("Use digits and optional leading +");
         } else if(page==Page::Phone) {
-            if(deck::phoneNumber(input.c_str())) {caller=input;action(CellActionKind::Dial,0,input);input="";}
-            else inform("Use digits and optional leading +");
+            if(callState>=0){phoneFeedback="A call is already active";inform(phoneFeedback);}
+            else if(deck::phoneNumber(input.c_str())) {
+                if(action(CellActionKind::Dial,0,input)){caller=input;input="";phoneFeedback="Calling...";}
+                else phoneFeedback=notice;
+            } else {phoneFeedback="Enter a phone number with an optional leading +";inform(phoneFeedback);}
         }
         changed(); return;
     }
@@ -627,18 +775,18 @@ void key(char c) {
         if(found) c=char('1'+(found-letters));
         if(c=='o') c='+';
         if(c=='p') c='0';
-        if(!((c>='0' && c<='9') || (c=='+' && input.isEmpty()))) return;
+        if(!((c>='0' && c<='9') || (c=='+' && input.isEmpty()) || (page==Page::Phone && (c=='*' || c=='#')))) return;
         if(input.length()>=16) return;
     } else if(input.length()>=160) return;
-    input+=c; changed();
+    input+=c;changed(true);
 }
-void text(int x,int y,const String& value,int scale=1) {
+void text(int x,int y,const Text& value,int scale=1) {
     auto& s=*board::screen;
     s.setTextSize(scale); s.setCursor(x,y); s.print(value);
 }
-String clipped(const String& s,unsigned count) {return s.length()>count?s.substring(0,count-1)+"~":s;}
-void wrap(const String& value,int x,int y,int columns,int rows,int scale=1) {
-    String clean;
+Text clipped(const Text& s,unsigned count) {return s.length()>count?s.substring(0,count-1)+"~":s;}
+void wrap(const Text& value,int x,int y,int columns,int rows,int scale=1) {
+    Text clean;
     // Built-in font is ASCII; keep received UTF-8 in storage and USB output.
     for(unsigned i=0;i<value.length();++i) {
         unsigned char c=value[i];
@@ -647,40 +795,43 @@ void wrap(const String& value,int x,int y,int columns,int rows,int scale=1) {
     }
     unsigned p=0;
     for(int row=0;row<rows && p<clean.length();++row) {
-        unsigned end=std::min(p+unsigned(columns),clean.length());
+        unsigned end=std::min(p+unsigned(columns),unsigned(clean.length()));
         int nl=clean.indexOf('\n',p);
         if(nl>=0 && unsigned(nl)<end) end=unsigned(nl);
         text(x,y+row*10*scale,clean.substring(p,end),scale);
         p=end; if(p<clean.length() && clean[p]=='\n')++p;
     }
 }
-void card(int x,int y,const char* shortcut,const char* title,const char* subtitle) {
-    auto& s=*board::screen;
-    s.drawRoundRect(x,y,106,75,6,GxEPD_BLACK);
-    text(x+9,y+8,shortcut,2); text(x+9,y+34,title); text(x+9,y+51,subtitle);
+void button(deck::UiRect r,const Text& label,bool filled=false){deck::drawUiButton(*board::screen,r,label,filled);}
+void pageTitle(const Text& value){text(10,44,"<",2);text(38,44,value,2);}
+void settingRow(unsigned index,const Text& label,const Text& detail,char shortcut,bool disabled=false) {
+    deck::drawSettingRow(*board::screen,index,label,disabled?Text("Off in airplane mode"):detail,shortcut,index==settingsCursor);
 }
-std::vector<String> chatWrap(const String& value,unsigned columns=30) {
-    String clean;
-    for(unsigned n=0;n<value.length();++n){const unsigned char c=value[n];if(c=='\n' || (c>=32 && c<127))clean+=char(c);else if(c>=0xc0)clean+='?';else if(c<32 && c!='\r')clean+=' ';}
-    std::vector<String> lines;unsigned at=0;
-    while(at<clean.length()) {
-        unsigned end=std::min(at+columns,clean.length());const int newline=clean.indexOf('\n',at);
-        if(newline>=0 && unsigned(newline)<end)end=unsigned(newline);
-        else if(end<clean.length()){const int space=clean.lastIndexOf(' ',end);if(space>=0 && unsigned(space)>at+columns/2)end=unsigned(space);}
-        lines.push_back(clean.substring(at,end));at=end;
-        if(at<clean.length() && (clean[at]=='\n' || clean[at]==' '))++at;
-    }
-    if(lines.empty())lines.emplace_back();
-    return lines;
+Text cellularSummary(){return airplaneMode()?Text("Airplane mode"):!linked?Text("Cellular unavailable"):!simReady?Text("Check SIM card"):Text(networkName());}
+Text pageNotice() {
+    if(airplaneMode() && page!=Page::DisplaySettings && page!=Page::AiSetup && page!=Page::AiModelPicker && page!=Page::AiKey && page!=Page::AiModel && page!=Page::AiEndpoint)return airplaneStatus();
+    if(page==Page::Ai)return aiScreenStatus();
+    if(page==Page::Home)return "";
+    if(page==Page::Phone)return phoneFeedback.length()?phoneFeedback:Text("Enter a number, then tap Call.");
+    return notice;
 }
-struct ChatLine {String value;unsigned group;bool outgoing;bool gap=false;};
-void appendBubble(std::vector<ChatLine>& lines,const String& sender,const String& body,bool outgoing,unsigned group) {
-    lines.push_back({clipped(sender,30),group,outgoing});
-    for(const auto& line:chatWrap(body))lines.push_back({line,group,outgoing});
-    lines.push_back({"",group,outgoing,true});
+void phoneView() {
+    pageTitle("Phone");text(10,68,clipped(callState>=0?call:cellularSummary(),36));
+    button(deck::PhonePlus,"+");button(deck::PhoneErase,"<");
+    Text number=callState>=0 && caller.length()?caller:input;
+    if(number.empty())text(43,90,"Phone number");
+    else {const int scale=number.length()>13?1:2;const Text visible=clipped(number,26);text(40+(160-int(visible.length())*6*scale)/2,scale==1?92:88,visible,scale);}
+    deck::drawPhonePad(*board::screen);
+    button(deck::PhonePrimary,callState==4 || callState==5?"Answer":callState>=0?"In call":"Call",!airplaneMode());
+    button(deck::PhoneEnd,callState>=0?"End":"Clear");
 }
-std::vector<ChatLine> threadLines() {
-    std::vector<ChatLine> lines;unsigned group=0;
+using ChatLine=deck::UiChatLine;
+using ChatLines=deck::UiChatLines;
+void appendBubble(ChatLines& lines,const Text& sender,const Text& body,bool outgoing,unsigned group) {
+    deck::appendChatBubble(lines,clipped(sender,30),body,outgoing,group);
+}
+ChatLines threadLines() {
+    ChatLines lines;unsigned group=0;
     if(page==Page::Ai) {
         for(const auto& m:ai.messages())appendBubble(lines,m.assistant?"AI Assistant":"You",m.text.c_str(),!m.assistant,group++);
         if(ai.busy && aiPending.length())appendBubble(lines,"You / sending",aiPending,true,group++);
@@ -691,7 +842,7 @@ std::vector<ChatLine> threadLines() {
         std::vector<const Message*> messages;
         for(const auto& m:store.messages())if(deck::conversationMatches(conversation,{m.medium==Medium::Radio,m.sequence,m.peer,m.text}))messages.push_back(&m);
         std::sort(messages.begin(),messages.end(),[](const Message* a,const Message* b){return a->sequence<b->sequence;});
-        for(const auto* m:messages)appendBubble(lines,m->incoming?(page==Page::Radio?String(m->peer):String("SMS")):String("You / ")+deliveryName(m->delivery,m->medium),m->text,!m->incoming,group++);
+        for(const auto* m:messages)appendBubble(lines,m->incoming?(page==Page::Radio?Text(m->peer):Text("SMS")):Text("You / ")+deliveryName(m->delivery,m->medium),m->text,!m->incoming,group++);
     }
     while(!lines.empty() && lines.back().gap)lines.pop_back();
     return lines;
@@ -699,215 +850,292 @@ std::vector<ChatLine> threadLines() {
 unsigned threadLineCount(){return threadLines().size();}
 void conversationsView() {
     auto& s=*board::screen;const auto rows=conversationRows();syncConversation(rows);
-    text(10,44,"<",2);text(38,44,"Messages",2);text(10,69,"Your conversations");text(160,69,"J/K or tap");
+    pageTitle("Messages");button({190,40,40,23},"New");text(10,69,"SMS, AI and Meshtastic");
     const unsigned offset=(conversationCursor/4)*4;
     for(unsigned n=0;n<4 && offset+n<rows.size();++n) {
         const auto& row=rows[offset+n];const int y=84+int(n)*41;
-        if(offset+n==conversationCursor)s.drawRoundRect(10,y,220,39,5,GxEPD_BLACK);
+        if(offset+n==conversationCursor)s.drawRoundRect(10,y,220,39,5,deck::Ink);
         text(19,y+6,clipped(row.title,33));wrap(row.preview,19,y+22,33,1);
     }
-    s.drawRoundRect(10,250,106,18,3,GxEPD_BLACK);text(38,255,"Previous");
-    s.drawRoundRect(124,250,106,18,3,GxEPD_BLACK);text(165,255,"Next");
+    s.drawRoundRect(10,250,106,18,3,deck::Ink);text(38,255,"Previous");
+    s.drawRoundRect(124,250,106,18,3,deck::Ink);text(165,255,"Next");
+}
+void composerView() {
+    auto& s=*board::screen;
+    s.drawRoundRect(10,214,220,54,5,deck::Ink);s.drawRoundRect(193,219,31,43,4,deck::Ink);text(197,237,"Send");
+    Text draft=input.isEmpty()?Text("Message..."):input+"_";
+    if(draft.length()>84)draft="<"+draft.substring(draft.length()-83);
+    wrap(draft,18,225,28,3);
 }
 void threadView() {
     auto& s=*board::screen;
-    text(10,44,"<",2);text(38,44,page==Page::Ai?"AI Assistant":page==Page::Radio?"Nearby LoRa":clipped(recipient,16),2);
-    if(page==Page::Ai){s.drawRoundRect(203,40,27,23,4,GxEPD_BLACK);text(208,48,"...");}
-    text(10,69,clipped(page==Page::Ai?aiConnectionText():page==Page::Radio?String("Nearby group / broadcasts"):String("SMS / ")+networkName(),36));
+    text(10,44,"<",2);text(38,44,page==Page::Ai?"AI Assistant":page==Page::Radio?"Meshtastic":clipped(recipient,16),2);
+    if(page==Page::Ai || page==Page::Radio){s.drawRoundRect(203,40,27,23,4,deck::Ink);text(208,48,"...");}
+    text(10,69,clipped(page==Page::Ai?aiConnectionText():page==Page::Radio?Text("Channel group"):Text("SMS / ")+networkName(),36));
     const auto lines=threadLines();const unsigned maxScroll=lines.size()>ThreadRows?lines.size()-ThreadRows:0;
     threadScroll=std::min(threadScroll,maxScroll);
     const unsigned end=lines.size()-threadScroll,start=end>ThreadRows?end-ThreadRows:0;
     if(lines.empty()) {
-        if(page==Page::Ai){wrap(ai.busy?String("Waiting for your provider..."):aiStartHint(),18,103,33,3);text(18,150,clipped(aiSettings.values().model,33));}
-        else if(page==Page::Radio)wrap("Messages are shared with nearby Handheld OS devices. This is a broadcast group, not a private chat.",18,102,33,6);
+        if(page==Page::Ai){wrap(ai.busy?Text("Waiting for your provider..."):aiStartHint(),18,103,33,3);text(18,150,clipped(aiSettings.values().model,33));}
+        else if(page==Page::Radio)wrap("Messages are shared with devices on your Meshtastic channel.",18,102,33,6);
         else wrap("Start your conversation below.",18,112,33,3);
     }
     for(unsigned n=start;n<end;) {
         if(lines[n].gap){++n;continue;}
         unsigned next=n+1;while(next<end && lines[next].group==lines[n].group && !lines[next].gap)++next;
         const int x=lines[n].outgoing?30:10,y=80+int(n-start)*10,h=int(next-n)*10+4;
-        if(lines[n].outgoing)s.fillRoundRect(x,y,200,h,4,GxEPD_BLACK);else s.drawRoundRect(x,y,200,h,4,GxEPD_BLACK);
-        s.setTextColor(lines[n].outgoing?GxEPD_WHITE:GxEPD_BLACK);
+        if(lines[n].outgoing)s.fillRoundRect(x,y,200,h,4,deck::Ink);else s.drawRoundRect(x,y,200,h,4,deck::Ink);
+        s.setTextColor(lines[n].outgoing?deck::Paper:deck::Ink);
         for(unsigned row=n;row<next;++row)text(x+7,83+int(row-start)*10,lines[row].value);
-        s.setTextColor(GxEPD_BLACK);n=next;
+        s.setTextColor(deck::Ink);n=next;
     }
-    s.drawRoundRect(10,190,75,17,3,GxEPD_BLACK);text(28,195,"Older");
-    s.drawRoundRect(95,190,75,17,3,GxEPD_BLACK);text(113,195,"Newer");
-    s.drawRoundRect(10,214,220,54,5,GxEPD_BLACK);s.drawRoundRect(193,219,31,43,4,GxEPD_BLACK);text(197,237,"Send");
-    String draft=input.isEmpty()?String("Message..."):input+"_";
-    if(draft.length()>84)draft="<"+draft.substring(draft.length()-83);
-    wrap(draft,18,225,28,3);
+    s.drawRoundRect(10,190,75,17,3,deck::Ink);text(28,195,"Older");
+    s.drawRoundRect(95,190,75,17,3,deck::Ink);text(113,195,"Newer");
+    composerView();
+}
+
+void captureBusyKeys(const void*) {
+    const uint32_t now=millis();
+    if(uint32_t(now-busyPollAt)>=2) {
+        busyPollAt=now;
+        // A queued navigation key may open secret entry only after this frame.
+        // Suppress raw event tracing for the entire captured batch.
+        const bool trace=keyboard.trace;keyboard.trace=false;
+        for(unsigned n=0;n<16;++n){const char c=keyboard.poll();if(!c)break;if(busyKeys.push(c,millis()))++frameQueuedKeys;}
+        keyboard.trace=trace;
+    }
+    // This callback never renders, changes pages or touches shared SPI/radio.
+    delay(1);
+}
+void applyBusyKeys() {
+    if(busyKeys.overflowed() || keyboard.lostEvents) {
+        keyboard.lostEvents=false;
+        busyKeys.reset();home();inform("Keyboard buffer filled; draft canceled. Please retype.");return;
+    }
+    char c=0;
+    while(busyKeys.pop(c,busyKeyTime)) {
+        // Only typing uses the capture time. Navigation and Enter still run
+        // here, after the old image completes, with an immediate redraw.
+        applyingBusyKey=true;key(c);applyingBusyKey=false;
+    }
 }
 void touchAt(int x,int y) {
-    // E-paper can lag the selected page/draft. Ignore touches until the newest
-    // screen is visible so an old row cannot become a Send button underneath.
-    if(dirty || !board::screen)return;
-    if(y>=303){key(27);return;}
-    if((page==Page::Messages || inConversation() || page==Page::AiSetup || page==Page::AiModelPicker) && x<36 && y>=36 && y<=65){key(27);return;}
-    if(page==Page::Home) {
-        if(y>=80 && y<=155){if(x>=10 && x<=116)key('m');else if(x>=124 && x<=230)key('p');}
-        else if(y>=165 && y<=240){if(x>=10 && x<=116)key('l');else if(x>=124 && x<=230)key('d');}
-        else if(y>=247 && y<=268){if(x>=10 && x<=116)key('a');else if(x>=124 && x<=230)key('s');}
-    } else if(page==Page::Messages && x>=10 && x<=230 && y>=250 && y<=268) {
+    // Never interpret a tap against a page or draft newer than the visible
+    // e-paper image. Send, Call and Share all have separate explicit targets.
+    if(ui.pending || !board::screen)return;
+    if(y>=303){if(x>=170)home();else key(27);return;}
+    if(page!=Page::Home && x<36 && y>=36 && y<=65){key(27);return;}
+    if(page==Page::Home){for(unsigned n=0;n<3;++n)if(deck::homeRow(n).contains(x,y)){homeCursor=n;key("mps"[n]);return;}}
+    else if(page==Page::Phone) {
+        if(const char digit=deck::phoneKeyAt(x,y)){key(digit);return;}
+        if(deck::PhonePlus.contains(x,y))key('+');
+        else if(deck::PhoneErase.contains(x,y))key('\b');
+        else if(deck::PhonePrimary.contains(x,y)){if(callState==4 || callState==5)key('a');else if(callState<0)key('\r');}
+        else if(deck::PhoneEnd.contains(x,y)){if(callState>=0)key('h');else{input="";changed();}}
+    } else if(page==Page::Messages) {
+        if(deck::UiRect{190,40,40,23}.contains(x,y)){key('n');return;}
         const auto rows=conversationRows();syncConversation(rows);
-        conversationCursor=x<=116?(conversationCursor>=4?conversationCursor-4:0):std::min(conversationCursor+4,unsigned(rows.size()-1));
-        selectedConversation=rows[conversationCursor].key;changed();
-    } else if(page==Page::Messages && x>=10 && x<=230 && y>=84 && y<248) {
-        const unsigned row=(y-84)/41;const auto rows=conversationRows();syncConversation(rows);
-        const unsigned selected=(conversationCursor/4)*4+row;
-        if((y-84)%41<39 && selected<rows.size()){conversationCursor=selected;selectedConversation=rows[selected].key;chooseConversation();}
+        if(x>=10 && x<=230 && y>=250 && y<=268){conversationCursor=x<120?(conversationCursor>=4?conversationCursor-4:0):std::min(conversationCursor+4,unsigned(rows.size()-1));selectedConversation=rows[conversationCursor].key;changed();}
+        else if(x>=10 && x<=230 && y>=84 && y<248){const unsigned row=(y-84)/41,selected=(conversationCursor/4)*4+row;if((y-84)%41<39 && selected<rows.size()){conversationCursor=selected;selectedConversation=rows[selected].key;chooseConversation();}}
     } else if(inConversation()) {
         if(y>=190 && y<=207){if(x>=10 && x<=85)key(17);else if(x>=95 && x<=170)key(18);}
-        else if(x>=193 && x<=224 && y>=219 && y<=262 && input.length())key('\r');
-        else if(page==Page::Ai && x>=203 && x<=230 && y>=40 && y<=63)openAiSetup(Page::Ai);
-    } else if(page==Page::SmsNumber && x>=10 && x<=230 && y>=211 && y<=243)key('\r');
-    else if(page==Page::Settings && x>=10 && x<=230) {
-        if(y>=66 && y<90)key('a');else if(y>=90 && y<112)key('c');
-        else if(y>=112 && y<136)key('w');else if(y>=136 && y<159)key('b');
-        else if(y>=159 && y<182)key('i');else if(y>=182 && y<203)key('f');
-        else if(y>=203 && y<223)key('k');else if(y>=223 && y<241)key('d');else if(y>=241 && y<=263)key('r');
-    } else if(page==Page::AiSetup && x>=10 && x<=230) {
-        if(y>=72 && y<125)key('e');else if(y>=125 && y<169)key('m');else if(y>=169 && y<190)key('k');
-        else if(y>=190 && y<210)key('x');else if(y>=210 && y<230)key('c');else if(y>=230 && y<252)key('a');
-    } else if(page==Page::AiModelPicker && x>=10 && x<=230 && y>=77 && y<=255) {
-        const unsigned row=(y-77)/36;if(row<=deck::AiModelPresetCount && (y-77)%36<34){modelCursor=row;key('\r');}
-    } else if((page==Page::AiEndpoint || page==Page::AiModel || page==Page::AiKey) && y>=205 && y<=229)key('\r');
+        else if(deck::UiRect{193,219,31,43}.contains(x,y) && input.length())key('\r');
+        else if(deck::UiRect{203,40,27,23}.contains(x,y)){if(page==Page::Ai)openAiSetup(Page::Ai);else if(page==Page::Radio){meshSetupReturn=Page::Radio;openCategory(Page::MeshSettings);}}
+    } else if(page==Page::SmsNumber){if(deck::UiRect{10,223,220,35}.contains(x,y))key('\r');}
+    else if(page==Page::Settings || page==Page::Connections || page==Page::MessagingSettings || page==Page::DisplaySettings || page==Page::CellularSettings){
+        const unsigned count=page==Page::Settings?6:page==Page::Connections?3:page==Page::MessagingSettings?2:page==Page::DisplaySettings?2:3;
+        for(unsigned n=0;n<count;++n)if(deck::settingsRow(n).contains(x,y)){settingsCursor=n;key('\r');return;}
+    } else if(page==Page::MeshSettings || page==Page::MeshRegion || page==Page::MeshPreset) {
+        const unsigned count=page==Page::MeshSettings?6:page==Page::MeshRegion?2:3;
+        for(unsigned n=0;n<count;++n)if(deck::settingsRow(n).contains(x,y)){settingsCursor=n;key('\r');return;}
+    } else if(page==Page::MeshChannel || page==Page::MeshKey) {
+        if(deck::UiRect{10,211,220,26}.contains(x,y))key('\r');
+        else if(page==Page::MeshKey && deck::UiRect{10,242,220,26}.contains(x,y))usePublicMeshKey();
+    } else if(page==Page::MeshNodes) {
+        if(deck::UiRect{10,244,106,25}.contains(x,y))key('a');
+        else if(deck::UiRect{124,244,48,25}.contains(x,y))key('k');else if(deck::UiRect{182,244,48,25}.contains(x,y))key('j');
+    } else if(page==Page::Location){if(deck::settingsRow(0).contains(x,y))key('g');else if(deck::UiRect{10,221,220,36}.contains(x,y))key('s');}
+    else if(page==Page::Wifi) {
+        if(deck::UiRect{174,40,56,24}.contains(x,y))key('w');
+        else if(deck::UiRect{10,101,106,22}.contains(x,y))key('r');else if(deck::UiRect{124,101,106,22}.contains(x,y))key('n');
+        else if(deck::UiRect{10,248,220,21}.contains(x,y))key('f');
+        else if(x>=10 && x<=230 && y>=128 && y<224){const unsigned selected=(wifiCursor/4)*4+(y-128)/24;if(selected<wifi.networks.size()){wifiCursor=selected;key('\r');}}
+    } else if(page==Page::Ble) {
+        if(deck::UiRect{186,40,44,24}.contains(x,y))key('b');
+        else if(deck::UiRect{10,115,66,22}.contains(x,y))key('r');else if(deck::UiRect{84,115,66,22}.contains(x,y))key('p');else if(deck::UiRect{158,115,72,22}.contains(x,y))key('c');
+        else if(deck::UiRect{10,248,150,21}.contains(x,y))key('f');else if(deck::UiRect{170,248,60,21}.contains(x,y))key('x');
+        else if(x>=10 && x<=230 && y>=151 && y<226){const unsigned selected=(bleCursor/3)*3+(y-151)/25;if(selected<bleDevices.size()){bleCursor=selected;key('\r');}}
+    } else if(page==Page::AiSetup){const char* actions="mkecxa";for(unsigned n=0;n<6;++n)if(deck::settingsRow(n).contains(x,y)){key(actions[n]);return;}}
+    else if(page==Page::AiModelPicker && x>=10 && x<=230 && y>=77 && y<=255){const unsigned row=(y-77)/36;if(row<=deck::AiModelPresetCount && (y-77)%36<34){modelCursor=row;key('\r');}}
+    else if((page==Page::AiEndpoint || page==Page::AiModel || page==Page::AiKey || page==Page::WifiSsid || page==Page::WifiPassword) && deck::UiRect{10,211,220,26}.contains(x,y))key('\r');
+    else if(page==Page::Apn && deck::UiRect{10,165,220,32}.contains(x,y))key('\r');
+    else if(page==Page::WifiForget || page==Page::BleForget){if(deck::UiRect{10,176,106,30}.contains(x,y))key('y');else if(deck::UiRect{124,176,106,30}.contains(x,y))key('n');}
+    else if(page==Page::BlePair && pairMode==BleEventKind::PairConfirm){if(deck::UiRect{10,169,106,30}.contains(x,y))key('y');else if(deck::UiRect{124,169,106,30}.contains(x,y))key('n');}
 }
+
 void draw() {
-    if(!board::screen || !dirty) return;
+    if(!board::screen || !ui.pending) return;
     uint32_t now=millis();
-    // Coalesce typing. Panel updates take ~700 ms; the modem has its own task.
-    if(refreshes && (uint32_t(now-drawnAt)<1200 || uint32_t(now-editedAt)<250)) return;
+    if(!ui.ready(now))return;
+    const uint32_t snapshot=ui.version,started=millis();
+    const bool composerOnly=refreshes && refreshes%16!=0 && !ui.urgent && inConversation() && page==renderedPage && threadScroll==renderedScroll;
+    frameQueuedKeys=0;
     auto& s=*board::screen;
-    if(refreshes%16==0) s.setFullWindow(); else s.setPartialWindow(0,0,240,320);
-    s.firstPage();
-    do {
-        s.fillScreen(GxEPD_WHITE);
-        text(10,13,"HANDHELD OS");
-        const auto wireless=deck::wifiIndicator(wifi.enabled,wifi.connected,wifi.connecting,wifi.rssi);
+    if(refreshes%16==0)s.setFullWindow();
+    else if(composerOnly)s.setPartialWindow(0,214,240,54);
+    else s.setPartialWindow(0,0,240,320);
+    if(composerOnly){s.fillRect(0,214,240,54,deck::Paper);composerView();}
+    else {
+        s.fillScreen(deck::Paper);
+        text(10,13,airplaneMode()?"AIRPLANE":"HANDHELD");
+        const auto wireless=deck::wifiIndicator(wifi.enabled && !airplaneMode(),wifi.connected && !airplaneMode(),wifi.connecting && !airplaneMode(),wifi.rssi);
         text(83,13,wireless.label);
         for(unsigned bar=0;bar<3;++bar) {
             const int h=3+int(bar)*3,x=112+int(bar)*4;
-            if(bar<wireless.bars)s.fillRect(x,23-h,3,h,GxEPD_BLACK);
-            else s.drawRect(x,23-h,3,h,GxEPD_BLACK);
+            if(bar<wireless.bars)s.fillRect(x,23-h,3,h,deck::Ink);
+            else s.drawRect(x,23-h,3,h,deck::Ink);
         }
-        const auto cell=deck::cellularIndicator(linked,simReady,network,signalDbm,operatorName.c_str(),systemInfo.c_str());
+        const auto cell=airplaneMode()?deck::CellularIndicator{"Off",0}:deck::cellularIndicator(linked,simReady,network,signalDbm,operatorName.c_str(),systemInfo.c_str());
         text(133,13,cell.label);
         for(unsigned bar=0;bar<4;++bar) {
             int h=3+int(bar)*3,x=157+int(bar)*4;
-            if(bar<cell.bars)s.fillRect(x,23-h,3,h,GxEPD_BLACK);
-            else s.drawRect(x,23-h,3,h,GxEPD_BLACK);
+            if(bar<cell.bars)s.fillRect(x,23-h,3,h,deck::Ink);
+            else s.drawRect(x,23-h,3,h,deck::Ink);
         }
-        String batteryText=battery>=0?String(battery)+"%":"--%";
+        Text batteryText=battery>=0?Text(battery)+"%":"--%";
         text(230-int(batteryText.length())*6,13,batteryText);
-        s.drawFastHLine(10,30,220,GxEPD_BLACK);
+        s.drawFastHLine(10,30,220,deck::Ink);
         if(page==Page::Home) {
-            text(10,42,networkName());
-            text(10,57,radio.ready?"915 MHz radio ready":"Radio unavailable");
-            card(10,80,"M","Messages","Conversations");
-            card(124,80,"P","Phone","Call controls");
-            card(10,165,"L","Radio","LoRa chat");
-            card(124,165,"D","Status","SIM + network");
-            s.drawRoundRect(10,247,106,21,4,GxEPD_BLACK);text(19,254,"A  AI chat");
-            s.drawRoundRect(124,247,106,21,4,GxEPD_BLACK);text(133,254,"S  Settings");
+            text(10,44,"Handheld",2);
+            const char* labels[]={"Messages","Phone","Settings"};
+            const Text details[]={Text("SMS, AI and Meshtastic"),cellularSummary(),Text("Connections and device")};
+            for(unsigned n=0;n<3;++n)deck::drawHomeRow(s,n,labels[n],details[n],"MPS"[n],n==homeCursor);
         } else if(page==Page::Messages) conversationsView();
         else if(inConversation())threadView();
         else if(page==Page::SmsNumber) {
-            text(10,44,"NEW MESSAGE",2); text(10,78,"To: phone number");
-            wrap(input+"_",10,104,18,2,2);
-            text(10,170,"W/E/R=1/2/3  S/D/F=4/5/6");
-            text(10,185,"Z/X/C=7/8/9  P=0  O=+");
-            s.drawRoundRect(10,211,220,32,5,GxEPD_BLACK);text(75,223,"Continue");
-        } else if(page==Page::Phone) {
-            text(10,44,"PHONE",2); wrap(call,10,78,35,3);
-            text(10,114,clipped(caller,34));
-            wrap(input+"_",10,145,18,2,2);
-            text(10,205,"Enter: dial  A: answer  H: end");
-            text(10,220,"W/E/R 1/2/3 | S/D/F 4/5/6");
-            text(10,235,"Z/X/C 7/8/9 | P 0 | O +");
-            text(10,250,"Voice needs carrier + audio path");
+            pageTitle("New message");text(10,78,"To");wrap(input+"_",10,101,18,2,2);
+            text(10,163,pendingLocationText.empty()?"Phone number, including country code":"Share your GPS location by SMS");
+            text(10,187,"Use the keyboard's printed digits.");
+            button({10,223,220,35},"Continue");
+        } else if(page==Page::Phone)phoneView();
+        else if(page==Page::Settings) {
+            pageTitle("Settings");
+            settingRow(0,"Airplane mode",airplaneStatus(),'A');
+            settingRow(1,"Connections","Wi-Fi, Bluetooth, cellular",'C');
+            settingRow(2,"Messaging","AI and Meshtastic",'M');
+            settingRow(3,"Display","Screen and keyboard lights",'D');
+            settingRow(4,"Location",settings.radios().gpsEnabled?"GPS on":"GPS off",'L');
+            settingRow(5,"About","Device and network status",'I');
+        } else if(page==Page::Connections) {
+            pageTitle("Connections");
+            settingRow(0,"Wi-Fi",wifi.status,'W',airplaneMode());
+            settingRow(1,"Bluetooth",bleStatus,'B',airplaneMode());
+            settingRow(2,"Cellular",cellularSummary(),'C',airplaneMode());
+        } else if(page==Page::MessagingSettings) {
+            pageTitle("Messaging");settingRow(0,"AI",aiSettings.values().model,'I');
+            settingRow(1,"Meshtastic",radio.ready?"Ready":"Set up your channel",'M');
+        } else if(page==Page::DisplaySettings) {
+            pageTitle("Display");const auto& value=settings.values();
+            settingRow(0,"Screen light",board::revision11?(value.frontLight?"On":"Off"):"Not fitted",'F');
+            settingRow(1,"Keyboard light",value.keyboardLight?"On":"Off",'K');
+        } else if(page==Page::CellularSettings) {
+            pageTitle("Cellular");
+            settingRow(0,"Access point",settings.values().apn[0]?settings.values().apn:"Modem default",'A',airplaneMode());
+            settingRow(1,"Carriers","Search nearby networks",'C',airplaneMode());
+            settingRow(2,"Refresh status",cellularSummary(),'R',airplaneMode());
+        } else if(page==Page::Location) {
+            pageTitle("Location");const auto point=gps.snapshot();
+            settingRow(0,"GPS",point.preferredEnabled?"On":"Off",'G',airplaneMode());
+            text(17,121,clipped(point.status,34));
+            if(point.fix){char value[48];snprintf(value,sizeof(value),"%.6f, %.6f",point.latitude,point.longitude);text(17,146,value);text(17,166,Text(point.satellites)+" satellites");}
+            else wrap(point.enabled?"Go outdoors for a clear view of the sky.":"Turn GPS on to find your location.",17,149,33,3);
+            button({10,221,220,36},"Share by SMS",point.fix && point.fixAgeMs<=30000 && !airplaneMode());
+        } else if(page==Page::MeshRegion || page==Page::MeshPreset) {
+            pageTitle(page==Page::MeshRegion?"Region":"Preset");
+            if(page==Page::MeshRegion){settingRow(0,"Not selected","Meshtastic stays off",' ');settingRow(1,"United States","US / 902-928 MHz",' ');}
+            else {settingRow(0,"Long / Fast","Longer range",' ');settingRow(1,"Medium / Fast","Balanced",' ');settingRow(2,"Short / Fast","Shorter range",' ');}
+        } else if(page==Page::MeshChannel || page==Page::MeshKey) {
+            const bool secret=page==Page::MeshKey;pageTitle(secret?"Channel key":"Channel");
+            Text visible=input;if(secret){visible="";for(unsigned n=0;n<input.size();++n)visible+='*';}
+            wrap(visible+"_",10,88,35,9);button({10,211,220,26},"Save");
+            if(secret)button({10,242,220,26},"Use public default key");else text(10,250,"Use the same name on each device");
+        } else if(page==Page::MeshNodes) {
+            pageTitle("Heard nodes");unsigned position=0,shown=0;
+            for(const auto& node:radio.nodes())if(node.id){if(position++<settingsCursor*4)continue;if(shown>=4)break;char id[20];snprintf(id,sizeof(id),"!%08lx",(unsigned long)node.id);const int y=80+int(shown++)*39;text(10,y,node.user.longName[0]?node.user.longName:id);text(10,y+15,Text(id)+" / "+Text(node.rssi)+" dBm");}
+            if(!shown)wrap("No devices heard yet. Match region, preset, channel and key on your devices.",10,94,35,6);
+            button({10,244,106,25},"Announce");button({124,244,48,25},"<");button({182,244,48,25},">");
+        } else if(page==Page::MeshSettings) {
+            pageTitle("Meshtastic");const auto& mesh=settings.mesh();
+            settingRow(0,"Meshtastic",mesh.enabled?"On":"Off",'M',airplaneMode());
+            settingRow(1,"Region",mesh.region==deck::MeshRegion::US?"US / 915 MHz":"Choose your region",'R',airplaneMode());
+            settingRow(2,"Preset",deck::meshPresetName(mesh.preset),'P',airplaneMode());
+            settingRow(3,"Channel",mesh.channel,'C',airplaneMode());
+            settingRow(4,"Heard nodes","Nearby devices",'N',airplaneMode());
+            settingRow(5,"Channel key",deck::meshPublicKey(mesh)?"Public default - no privacy":mesh.keyBytes==16?"Custom AES-128 key":"Custom AES-256 key",'K',airplaneMode());
         } else if(page==Page::Diagnostics) {
-            text(10,44,"DEVICE STATUS",2);
-            text(10,76,String("Board v1.")+(board::revision11?"1":"0"));
-            text(10,92,linked?"Modem: responding":"Modem: no response");
-            text(10,108,"SIM: "+clipped(sim,28));
-            text(10,124,networkName());
-            text(10,140,signalDbm?String(signalDbm)+" dBm RSSI":"RSSI: unknown");
-            text(10,156,smsConfigured?"SMS transport configured":"SMS transport unavailable");
-            text(10,172,radio.ready?"LoRa: 915 MHz ready":"LoRa error: "+String(radio.error));
-            text(10,188,store.persistent?"History: saved in NVS":"History: RAM only");
-            text(10,211,"A7682E: poor US band coverage");
-            text(10,227,"R Refresh  I Import SIM inbox");
-            text(10,243,"USB: status / diag / help");
-        } else if(page==Page::Settings) {
-            const auto& value=settings.values();
-            text(10,44,"SETTINGS",2);
-            text(10,75,"A  APN: "+clipped(value.apn[0]?String(value.apn):String("Use modem profile"),25));
-            text(10,99,"C  Scan cellular carriers");
-            text(10,123,"W  Wi-Fi setup");
-            text(10,147,"B  Bluetooth LE setup");
-            text(10,169,"I  AI chat setup");
-            text(10,190,String("F  Screen light: ")+(board::revision11?(value.frontLight?"On":"Off"):"Not fitted"));
-            text(10,211,String("K  Keyboard light: ")+(value.keyboardLight?"On":"Off"));
-            text(10,232,"D  Device status");text(10,247,"R  Refresh cellular modem");
-            text(10,261,settings.persistent?"Settings saved on device":"Settings storage unavailable");
+            pageTitle("About");text(10,82,"Handheld OS / native ESP-IDF");
+            text(10,108,Text("T-Deck Pro v1.")+(board::revision11?"1":"0"));
+            text(10,137,cellularSummary());text(10,157,"Wi-Fi: "+Text(wifi.status));
+            text(10,177,radio.ready?"Meshtastic ready":"Meshtastic off / unavailable");
+            text(10,197,store.persistent?"Messages saved on device":"Message storage unavailable");
+            text(10,237,"More details: USB status command");
         } else if(page==Page::Apn) {
-            text(10,44,"MOBILE DATA APN",2);
+            pageTitle("Access point");
             wrap(input+"_",10,84,35,3);
-            text(10,132,"Enter: save and apply");
-            text(10,151,"Sym: cancel and return home");
-            wrap("Changing the APN does not add support for missing radio bands.",10,189,35,3);
-            text(10,244,"T-Mobile: fast.t-mobile.com");
+            button({10,165,220,32},"Save");
+
+            wrap("Use the APN supplied by your carrier.",10,222,35,2);
+
         } else if(page==Page::Carriers) {
             text(10,44,"CARRIER SCAN",2);wrap(carrierStatus,10,73,35,2);
             for(unsigned n=0;n<4 && carrierOffset+n<carriers.size();++n) {
                 const auto& row=carriers[carrierOffset+n];int y=105+n*31;
-                text(10,y,clipped(row.code=="313100"?String("FirstNet"):String(row.name.c_str()),34));
+                text(10,y,clipped(row.code=="313100"?Text("FirstNet"):Text(row.name.c_str()),34));
                 const char* state=row.status==1?"Available":row.status==2?"Current":row.status==3?"Forbidden":"Unknown";
-                text(10,y+12,String(row.code.c_str())+"  "+(row.technology==7?String("LTE"):String("RAT ")+row.technology)+"  "+state);
+                text(10,y+12,Text(row.code.c_str())+"  "+(row.technology==7?Text("LTE"):Text("RAT ")+row.technology)+"  "+state);
             }
             text(10,239,"R Scan again   J/K Page");text(10,255,"Scan does not switch carriers");
         } else if(page==Page::Wifi) {
-            text(10,44,"WI-FI / 2.4 GHz",2);text(10,73,clipped(wifi.status,35));text(10,87,wifi.address.length()?"IP "+wifi.address:String("No IP address"));
-            text(10,105,"W On/Off  R Scan  N Hidden SSID");
+            pageTitle("Wi-Fi");button({174,40,56,24},wifi.enabled?"On":"Off",wifi.enabled && !airplaneMode());text(10,73,clipped(wifi.status,35));text(10,87,wifi.address.length()?"IP "+wifi.address:Text("2.4 GHz networks"));
+            button({10,101,106,22},"Scan");button({124,101,106,22},"Add network");
             unsigned offset=(wifiCursor/4)*4;
             if(wifi.networks.empty())text(10,140,wifi.enabled?"No scan results yet. R scans.":"Wi-Fi is off. W turns it on.");
             for(unsigned n=0;n<4 && offset+n<wifi.networks.size();++n) {
                 const auto& row=wifi.networks[offset+n];int y=128+n*24;
-                text(10,y,String(offset+n==wifiCursor?"> ":"  ")+clipped(row.ssid,31));
-                text(22,y+11,String(row.rssi)+" dBm / "+(row.auth==WIFI_AUTH_OPEN?"Open":WifiService::supported(row.auth)?"Password":"Unsupported security"));
+                text(10,y,Text(offset+n==wifiCursor?"> ":"  ")+clipped(row.ssid,31));
+                text(22,y+11,Text(row.rssi)+" dBm / "+(row.auth==WIFI_AUTH_OPEN?"Open":WifiService::supported(row.auth)?"Password":"Unsupported security"));
             }
-            text(10,232,"J/K Select   Enter Connect");text(10,250,"F Forget saved Wi-Fi network");
+            button({10,248,220,21},"Forget saved network");
         } else if(page==Page::WifiSsid || page==Page::WifiPassword) {
             bool secret=page==Page::WifiPassword;
-            text(10,44,secret?"WI-FI PASSWORD":"WI-FI NAME",2);
+            pageTitle(secret?"Password":"Network name");
             if(secret)wrap(wifiName,10,78,35,2);
-            String visible=input;
+            Text visible=input;
             if(secret){visible="";for(unsigned i=0;i<input.length();++i)visible+='*';}
             wrap(visible+"_",10,110,35,3);
-            text(10,164,secret?"Enter: save and connect":"Enter: continue");text(10,184,"Sym: cancel and return home");
-            if(secret){text(10,216,"Blank password: open Wi-Fi only");text(10,236,"Password stays on this device");}
+            button({10,211,220,26},secret?"Connect":"Continue");
+            if(secret)text(10,249,"Password stays on this device");
         } else if(page==Page::WifiForget || page==Page::BleForget) {
-            text(10,44,"FORGET CONNECTION",2);
-            wrap(page==Page::WifiForget?String("Remove saved Wi-Fi name and password?"):String(forgetAllBonds?"Remove all BLE bonds and the saved keyboard?":"Remove the saved BLE keyboard and its bond?"),10,90,35,5);
-            text(10,176,"Y Confirm     N Cancel");
+            pageTitle("Forget device");
+            wrap(page==Page::WifiForget?Text("Remove saved Wi-Fi name and password?"):Text(forgetAllBonds?"Remove all BLE bonds and the saved keyboard?":"Remove the saved BLE keyboard and its bond?"),10,90,35,5);
+            button({10,176,106,30},"Forget");button({124,176,106,30},"Cancel");
         } else if(page==Page::Ble) {
-            text(10,44,"BLUETOOTH LE",2);text(10,73,clipped(bleStatus,35));text(10,87,clipped(phoneStatus,35));text(10,101,clipped(keyboardStatus,35));
-            text(10,119,"B On/Off  P Phone  R Scan");text(10,132,"C Reconnect saved keyboard");
+            pageTitle("Bluetooth");button({186,40,44,24},bleActive?"On":"Off",bleActive && !airplaneMode());text(10,73,clipped(bleStatus,35));text(10,87,clipped(phoneStatus,35));text(10,101,clipped(keyboardStatus,35));
+            button({10,115,66,22},"Scan");button({84,115,66,22},"Phone");button({158,115,72,22},"Reconnect");
             unsigned offset=(bleCursor/3)*3;
             if(bleDevices.empty())text(10,162,bleScanning?"Scanning BLE devices...":"Put keyboard in pairing mode");
             for(unsigned n=0;n<3 && offset+n<bleDevices.size();++n) {
                 const auto& row=bleDevices[offset+n];int y=151+n*25;
-                text(10,y,String(offset+n==bleCursor?"> ":"  ")+clipped(row.name,31));
-                text(22,y+11,String(row.rssi)+" dBm "+(row.hid?"HID / keyboard candidate":"BLE device"));
+                text(10,y,Text(offset+n==bleCursor?"> ":"  ")+clipped(row.name,31));
+                text(22,y+11,Text(row.rssi)+" dBm "+(row.hid?"HID / keyboard candidate":"BLE device"));
             }
-            text(10,232,"J/K Select   Enter Pair keyboard");text(10,249,"F Forget keyboard  X Clear bonds");
+            button({10,248,150,21},"Forget keyboard");button({170,248,60,21},"All bonds");
         } else if(page==Page::BlePair) {
             text(10,44,"BLUETOOTH PAIR",2);
             if(pairMode==BleEventKind::PairConfirm) {
                 text(10,83,"Compare this code on both devices");
                 char pin[8];snprintf(pin,sizeof(pin),"%06lu",(unsigned long)pairPin);text(10,117,pin,3);
-                text(10,169,"Y Codes match   N Reject");
+                button({10,169,106,30},"Match");button({124,169,106,30},"Reject");
             } else if(pairMode==BleEventKind::PairDisplay) {
                 text(10,83,"Type this code on the other device");
                 char pin[8];snprintf(pin,sizeof(pin),"%06lu",(unsigned long)pairPin);text(10,117,pin,3);
@@ -915,84 +1143,112 @@ void draw() {
             } else {text(10,83,"Enter the other device's 6-digit code");text(10,117,input+"_",3);text(10,169,"Enter: submit passkey");text(10,190,"W/E/R 1/2/3 | S/D/F 4/5/6");text(10,205,"Z/X/C 7/8/9 | P 0");}
             text(10,241,"Sym cancels. Expires in 60 seconds.");
         } else if(page==Page::AiSetup) {
-            const auto& value=aiSettings.values();text(10,44,"<",2);text(38,44,"AI SETUP",2);
-            text(10,78,"E  HTTPS API base URL");wrap(value.endpoint,22,94,33,3);
-            text(10,130,"M  Model");wrap(value.model[0]?value.model:"Choose your provider's model",22,146,33,2);
-            text(10,176,String("K  API key: ")+(value.key[0]?"Saved (hidden)":"Not set"));
-            text(10,196,"X Remove saved API key");text(10,216,"C Clear this conversation");text(10,236,"A Open AI conversation");
-            text(10,257,aiSettings.persistent?"Key saved on device, not encrypted":"AI settings storage unavailable");
+            const auto& value=aiSettings.values();pageTitle("AI settings");
+            settingRow(0,"Model",value.model,'M');settingRow(1,"API key",value.key[0]?"Saved (hidden)":"Not set",'K');
+            settingRow(2,"Endpoint",value.endpoint,'E');settingRow(3,"Clear chat","Remove this conversation",'C');
+            settingRow(4,"Forget key","Remove saved API key",'X');settingRow(5,"Open chat","Start a conversation",'A');
         } else if(page==Page::AiModelPicker) {
-            text(10,44,"<",2);text(38,44,"Choose model",2);
+            pageTitle("Choose model");
             for(unsigned n=0;n<=deck::AiModelPresetCount;++n) {
                 const int y=77+int(n)*36;
-                if(n==modelCursor)s.drawRoundRect(10,y,220,34,4,GxEPD_BLACK);
+                if(n==modelCursor)s.drawRoundRect(10,y,220,34,4,deck::Ink);
                 text(19,y+5,n<deck::AiModelPresetCount?deck::AiModelPresets[n].label:"Custom model");
                 text(19,y+19,n<deck::AiModelPresetCount?deck::AiModelPresets[n].id:"Enter a provider model ID");
             }
         } else if(page==Page::AiEndpoint || page==Page::AiModel || page==Page::AiKey) {
-            const bool secret=page==Page::AiKey;text(10,44,secret?"AI API KEY":page==Page::AiModel?"AI MODEL":"AI HTTPS ENDPOINT",2);
-            String visible=input;if(secret){visible="";for(unsigned n=0;n<input.length();++n)visible+='*';}
-            wrap(visible+"_",10,88,35,11);text(10,213,"Enter: save   Sym: cancel");
-            if(secret){text(10,235,"Enter a replacement key, never shown");text(10,250,"Blank Enter removes the saved key");}
-            else if(page==Page::AiEndpoint){text(10,235,"API base, e.g. https://host/v1");text(10,250,"HTTPS only; redirects refused");}
+            const bool secret=page==Page::AiKey;pageTitle(secret?"API key":page==Page::AiModel?"Model":"Endpoint");
+            Text visible=input;if(secret){visible="";for(unsigned n=0;n<input.length();++n)visible+='*';}
+            wrap(visible+"_",10,88,35,11);button({10,211,220,26},"Save");
+            if(secret)text(10,250,"Blank removes the saved key");
+            else if(page==Page::AiEndpoint)text(10,250,"HTTPS API base, e.g. host/v1");
             else text(10,242,"Use your provider's exact model ID");
         }
-        s.drawFastHLine(10,273,220,GxEPD_BLACK);
-        wrap(page==Page::Ai?aiScreenStatus():notice,10,282,36,2);
-        text(10,308,inConversation()?"Sym: Back    Enter: Send":"Sym: Back / Home");
-    } while(s.nextPage());
+        s.drawFastHLine(10,273,220,deck::Ink);
+        wrap(pageNotice(),10,281,36,2);
+        text(10,308,page==Page::Home?"Tap an app":"< Back");
+        if(page!=Page::Home)text(200,308,"Home");
+    }
+    const bool displayed=s.refresh();
+    if(!displayed){
+        platform::console.println("Display refresh failed");
+        lastDrawMs=uint32_t(millis()-started);maxDrawMs=std::max(maxDrawMs,lastDrawMs);
+        applyBusyKeys();return;
+    }
     // Consume a press that arrived while the blocking e-paper refresh was in
     // flight. It began against the old image and must not activate a new Send.
     int ignoredX=0,ignoredY=0;touch.poll(ignoredX,ignoredY);
-    dirty=false; drawnAt=millis(); ++refreshes;
+    lastDrawMs=uint32_t(millis()-started);maxDrawMs=std::max(maxDrawMs,lastDrawMs);
+    renderedPage=page;renderedScroll=threadScroll;++refreshes;
+    ui.rendered(snapshot);
+    applyBusyKeys();
 }
 }
-void setup() {
-    Serial.begin(115200); // Boot on battery without waiting for a USB host.
+void setupDevice() {
+    platform::begin(); // Boot on battery without waiting for a USB host.
+    const esp_err_t nvsStatus=nvs_flash_init();
+    if(nvsStatus!=ESP_OK)platform::console.println("Saved storage unavailable; keeping existing NVS unchanged.");
     board::begin();
-    if(board::unsupported) {Serial.println("T-Deck Pro MAX detected; unsupported profile. Radios disabled.");return;}
+    if(board::unsupported) {platform::console.println("T-Deck Pro MAX detected; unsupported profile. Radios disabled.");return;}
     keyboard.begin();
+    if(board::screen)board::screen->setBusyCallback(captureBusyKeys);
     touch.begin();
     store.begin();
     settings.begin();
     aiSettings.begin();ai.begin();
     board::lights(settings.values().frontLight,settings.values().keyboardLight);
     battery=board::batteryPercent();
-    wifi.changed=[](const String& value){inform("Wi-Fi: "+value);};
+    wifi.changed=[](const std::string& value){inform(Text("Wi-Fi: ")+Text(value));};
     wifi.signalChanged=[](){changed();};
+    initializeAirplaneMode(settings,wifi,radio,gps);
     wifi.configure(settings.wireless());
+    gps.configure(settings.radios().gpsEnabled);
     bleTask=startBleTask();
     if(bleTask && settings.wireless().bleEnabled) {
         bleRequest(BleCommand::Enable);
-        if(settings.wireless().keyboardAddress[0])bleRequest(BleCommand::Connect,settings.wireless().keyboardAddress,settings.wireless().keyboardAddressType);
+        if(!airplaneMode() && settings.wireless().keyboardAddress[0])bleRequest(BleCommand::Connect,settings.wireless().keyboardAddress,settings.wireless().keyboardAddressType);
     }
+    radio.changed=[](){if(page==Page::Radio || page==Page::MeshSettings || page==Page::MeshNodes)changed();};
     radio.received=[](const deck::RadioPacket& p,int rssi){
         char peer[20]; snprintf(peer,sizeof(peer),"Node %08lX",(unsigned long)p.sender);
         std::string identity=std::to_string(p.sender)+":"+std::to_string(p.sequence);
-        if(store.add(Medium::Radio,true,peer,p.text.c_str(),deck::fingerprint(identity))) inform(String(peer)+" / "+String(rssi)+" dBm");
+        if(store.add(Medium::Radio,true,peer,p.text.c_str(),deck::fingerprint(identity))) inform(Text(peer)+" / "+Text(rssi)+" dBm");
     };
     radio.sent=[](uint32_t id,bool ok){
-        store.update(id,ok?Delivery::Submitted:Delivery::Unknown);
-        inform(ok?"LoRa transmitted; receipt unconfirmed":"LoRa result unknown");
+        if(id)store.update(id,ok?Delivery::Submitted:Delivery::Unknown);
+        inform(id?(ok?"Message transmitted; receipt unconfirmed":"Transmission result unknown"):(ok?"Node info announced":"Node announcement failed"));
     };
-    radio.begin();
-    cellTask=startCellTask();
-    if(cellTask && settings.values().apn[0]) action(CellActionKind::SetApn,0,"",settings.values().apn);
+    radio.configure(settings.mesh());
+    cellTask=startCellTask(settings.values().apn);
     if(!cellTask) inform("Could not start cellular task");
     if(!keyboard.ready) inform("Keyboard unavailable; use USB commands");
     help();
     draw();
 }
-void loop() {
+void loopDevice() {
     if(board::unsupported) {delay(100);return;}
-    serialPoll(); cellPoll(); wifi.poll(); blePoll();
+    serialPoll(); cellPoll(); wifi.poll(); blePoll();gps.poll();
     if(ai.poll()){aiPending="";threadScroll=0;changed();}
+    if(page==Page::Location) {
+        const auto point=gps.snapshot();
+        if(point.fix!=gpsUiFix || point.enabled!=gpsUiEnabled){gpsUiFix=point.fix;gpsUiEnabled=point.enabled;changed();}
+        if(uint32_t(millis()-gpsUiAt)>=2000) {
+            gpsUiAt=millis();char signature[128];
+            snprintf(signature,sizeof(signature),"%s/%u/%.5f/%.5f/%d",point.status,unsigned(point.satellites),point.latitude,point.longitude,point.fixAgeMs<=30000);
+            if(gpsUiSignature!=signature){gpsUiSignature=signature;changed();}
+        }
+    }
     bool radioWasReady=radio.ready;
     radio.poll();
     if(radio.ready!=radioWasReady) inform(radio.ready?"LoRa receiver restored":"LoRa receive unavailable; retrying");
     for(unsigned i=0;i<16;++i){char c=keyboard.poll();if(!c)break;key(c);}
+    if(keyboard.lostEvents){keyboard.lostEvents=false;busyKeys.reset();home();inform("Keyboard events lost; draft canceled. Please retype.");}
     int touchX=0,touchY=0;if(touch.poll(touchX,touchY))touchAt(touchX,touchY);
     if(uint32_t(millis()-batteryAt)>=30000){batteryAt=millis();int value=board::batteryPercent();if(value!=battery){battery=value;changed();}}
     draw();
     delay(5);
+}
+
+extern "C" void app_main() {
+    setupDevice();
+    for(;;)loopDevice();
 }

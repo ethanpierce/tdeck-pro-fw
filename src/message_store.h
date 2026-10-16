@@ -1,5 +1,5 @@
 #pragma once
-#include <Preferences.h>
+#include "nvs_store.h"
 #include <vector>
 #include <cstdint>
 enum class Medium : uint8_t { Sms, Radio };
@@ -20,7 +20,9 @@ public:
     bool persistent=false;
 private:
     bool save(Message& message);
-    Preferences prefs_;
+    NvsStore prefs_;
     std::vector<Message> messages_;
     uint32_t next_=1;
 };
+
+static_assert(sizeof(Message)==536, "Keep the existing NVS message layout");

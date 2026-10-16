@@ -1,61 +1,61 @@
-# Software validation and remaining hardware checks
+# Validation
 
-The starter was subsequently built and flashed on the user's device on
-2026-10-16. See [the local bench record](BENCH_2026-10-16.md) for two boot/USB
-captures, physical Settings/light/APN checks, saved preferences after restart,
-modem/SIM readiness, network scan/registration denial and
-remaining hardware checks. The cloud preparation record below is historical.
+The native firmware uses ESP-IDF 5.4.0 and FreeRTOS, with no Arduino component.
+Physical checks and their exact firmware revisions are recorded in the
+[dated bench log](BENCH_2026-10-16.md). A host test or successful build does not
+establish radio reception, carrier eligibility, voice audio or battery life.
 
-Prepared on 2026-10-16 in a Linux cloud development environment. There was no physical T-Deck Pro connected. The software checks below support a flashable starter handoff; they do not establish that this device works as a US T-Mobile phone.
+## Repeat the software checks
 
-## Repeat the checks locally
-
-With the Python environment active and a C++ compiler available:
+Use the pinned Python environment and a C++17 compiler:
 
 ```sh
 bash tools/test.sh
 pio run -e tdeck-pro
-python -m py_compile tools/bench.py tools/package.py
+python tools/release.py --self-test
 ```
 
-The test runner builds and executes five host binaries with `-Wall -Wextra -Werror`, AddressSanitizer and UndefinedBehaviorSanitizer. LeakSanitizer is disabled by default because it cannot attach under some sandbox policies; address/undefined-behavior checking remains enabled.
+The host runner builds eleven binaries with `-Wall -Wextra -Werror`,
+AddressSanitizer and UndefinedBehaviorSanitizer. LeakSanitizer is disabled by
+default where sandbox attachment is unavailable; the other sanitizers remain on.
 
-## Additional local checks — 2026-10-16
-
-The current host suites also passed three modem scenarios for APN apply/profile
-reuse, rejection of APN injection and non-query commands, and a 90-second network
-scan without reconnect. A fourth host binary tests APN validation, settings NVS
-restart persistence, namespace isolation, failed-write rollback and corrupted or
-truncated record recovery. Physical Settings/APN/light checks and their limits
-are recorded in the bench report above.
-
-The connectivity pass adds a tenth modem scenario for on-device carrier scan
-start/result/completion events, a fifth host binary for carrier parsing, Wi-Fi
-limits, BLE addresses and HID key-array/NKRO decoding (including 6,000 malformed
-inputs), and wireless-settings persistence/old-record preservation tests. See
-[connectivity setup](CONNECTIVITY.md) and the later section of the bench report.
-
-## Checks exercised during preparation
-
-| Check | Evidence and scope |
+| Suite | Coverage |
 | --- | --- |
-| Core regression suite | Passed 811 assertions plus 12,000 malformed SMS/radio packet pairs. Covers AT response/prompt parsing, unsolicited events, queue limits, SMS submission uncertainty, late responses, modem-reset recovery, streamed inbox responses, CEREG parsing, SMS PDU fixtures and bounds, malformed radio packets and keyboard modifier/event mapping. |
-| Message-store suite | Passed 48 assertions against a host Preferences fake using the actual store code: 16-message retention, reboot recovery of pending sends, delivery updates, duplicate filtering, integrity-check rejection of corrupt records and RAM-only behavior after writes fail. |
-| Cellular-service simulation | Passed six scenarios using the actual UART-owner loop with fake UART/FreeRTOS and a deterministic clock: slow modem boot and delayed SIM/storage readiness; hangup replacing an unsent dial; one-SMS gating and timeout uncertainty without resend; modem restart during SMS; a 100-message streamed SIM inbox; and slow call-state queries allowing SIM diagnostics/SMS setup to progress. This does not simulate RF, actual serial timing, flash, audio, or carrier behavior. |
-| Firmware build | Passed using the pinned Espressif32 toolchain and T-Deck Pro ESP32-S3 profile, supplied partition table and vendored display driver. Application: 416,813 bytes; static RAM: 21,160 bytes. Heap/task/buffer allocations occur at runtime and are additional to static RAM. |
-| USB capture utility | Passed a simulated pseudo-terminal serial-device test of `status`/`diag` transmission, response capture and logging. Python syntax and CLI help also checked. No actual board serial/USB behavior was established. |
-| Documentation | Local Markdown links checked; hardware and radio defaults cross-checked against the documented vendor references |
+| Core | AT response/prompt/URC parsing, queue and timeout behavior, SMS uncertainty, reset recovery, streamed inbox, SMS/radio codecs, keyboard modifiers; 12,000 malformed SMS/radio pairs |
+| Message store | Actual store and native NVS adapter, 16-record retention, pending-send recovery, duplicate suppression, corruption and write failures |
+| Cellular service | Actual UART-owner loop with a fake UART/FreeRTOS clock: 30 scenarios including delayed SIM setup, storage fallback/restoration, both-store import, backpressure, TCP lease/reset/expiry, warm two-turn reuse, strict TCP mode queries and interleaved notifications |
+| Settings | APN validation, existing blob formats, saved settings across restart, isolated namespaces, wireless preferences and failed-write/corruption handling |
+| Connectivity | Carrier parsing, Wi-Fi limits, signal indicators, BLE addresses and HID array/NKRO decoding; 6,000 malformed inputs |
+| AI | HTTPS/configuration rules, JSON escaping, model profiles, bounded history, 500 Unicode character replies, secret-safe errors and NVS rollback; 6,000 malformed replies |
+| Conversations | Peer normalization/reply preservation, broadcast scope, ordering and bounded UTF-8 previews; 6,000 malformed previews |
+| Touch | Controller-specific packets, checksum, coordinate/press/release validation; 6,000 malformed packets |
+| LTE HTTP | HTTP framing and bounds, HEX socket framing, UTC clock, exact binary AT payload handling; 4,000 malformed responses |
+| UI input | Immediate navigation, 100 ms quiet/250 ms burst bound, dirty-generation races, clock wrap, busy-key FIFO and fail-closed overflow |
+| Native display | Framebuffer/font clipping and polarity, full/partial command/window/plane sequences, bulk SPI transfer, busy callback, timeout and error cleanup |
 
-The firmware build creates the app, bootloader, partition image and ELF. The final package's `firmware/BUILD_INFO.txt` identifies the source commit; `firmware/SHA256SUMS` identifies the included files. The merged `combined.bin` uses the documented ESP32-S3 offsets. Keep the matching committed source with any distributed firmware image.
+The native build passed for ESP32-S3, DIO 16 MiB flash, QSPI PSRAM, USB
+Serial/JTAG and the existing partition table. Production builds use `-O2`; assertions,
+watchdogs, TLS verification, stack sizes and task affinity remain enabled/configured
+as before the optimization switch. It links only native SDK services
+and RadioLib's portable C++ HAL. Compiler inputs were checked for Arduino,
+NimBLE-Arduino and Adafruit runtime include paths; none were present.
 
-## What still requires the device
+Release fixtures check native SDK identity, chip/image headers, partition
+offsets, the untouched NVS gap, initial OTA metadata, exact-commit source ZIPs,
+OS-package checksums, installer erase defaults and restoration of local build
+configuration after failure. Release builds regenerate from committed
+`sdkconfig.defaults` so a maintainer's menuconfig changes cannot silently alter
+the public image. Packages use four separate images; no padded merged flash
+image is distributed.
 
-- Correct PCB revision detection, power sequencing and battery/USB-only behavior.
-- E-paper initialization/refresh, actual keyboard scan wiring and physical key legends.
-- Modem AT response and firmware identity, SIM readiness, antenna/RF service and carrier registration.
-- Real SMS receipt and transmission, error behavior and persistence on the ESP32's NVS.
-- Carrier VoLTE/IMS eligibility, incoming/outgoing calls, microphone and speaker audio both ways.
-- SX1262 transmit/receive with another compatible 915 MHz peer, including reception around e-paper refreshes.
-- Charging behavior, current draw, temperature and battery life.
+## Hardware acceptance still required
 
-Use [NEXT_STEPS.md](../NEXT_STEPS.md) as the bench acceptance sequence and [FLASHING.md](FLASHING.md) for the original-flash backup before the first upload.
+Consult the bench log for completed checks. Outstanding work includes inbound
+SMS, full keyboard/touch coverage, BLE keyboard/phone pairing (deferred by the
+user), a second LoRa peer, full audio-routing/quality coverage, battery-only operation and power/current
+measurements. Native-driver regression checks must be distinguished from
+successful tests of earlier firmware.
+
+Keep private backups, credentials, SIM contents, camera captures and raw logs
+outside source/release archives. Use [NEXT_STEPS.md](../NEXT_STEPS.md) for the
+remaining bench sequence and [FLASHING.md](FLASHING.md) for backup/recovery.

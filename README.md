@@ -1,41 +1,46 @@
 # Handheld OS
 
-A keyboard-first firmware foundation for the **LILYGO T-Deck Pro with an A7682E modem and 915 MHz SX1262 radio**. It runs on the ESP32-S3 using Arduino/FreeRTOS, with e-paper conversations for SMS, AI and nearby LoRa broadcasts, optional touch controls, call controls and USB diagnostics.
+> Development paused on 2026-10-16. This is a work-in-progress checkpoint; the
+> combined UI, Meshtastic, GPS and Airplane mode changes are not yet flashed or
+> fully validated. See [the resume plan and test checklist](docs/DEVELOPMENT_PAUSE.md).
 
-**[Install in your browser](https://ethanpierce.github.io/tdeck-pro-fw/)** — no build tools required.
-[macOS instructions](docs/INSTALL_MACOS.md) · [Windows instructions](docs/INSTALL_WINDOWS.md) · [Firmware downloads](https://github.com/ethanpierce/tdeck-pro-fw/releases)
+A touch and keyboard firmware for the **LILYGO T-Deck Pro with an A7682E modem and 915 MHz SX1262 radio**. It runs on the ESP32-S3 using native ESP-IDF 5.4 and FreeRTOS, with e-paper conversations for SMS, AI and a Meshtastic channel, a touch dialer, settings and USB diagnostics.
+
+**The first public firmware release and hosted installer are pending validation.** Browser installation and simple macOS/Windows download packages are prepared; build from source below until they are published.
+[macOS instructions](docs/INSTALL_MACOS.md) · [Windows instructions](docs/INSTALL_WINDOWS.md)
 
 An independent hobby project. Hardware and carrier names identify compatible equipment and services; they do not imply affiliation or endorsement.
 
 **The A7682E is a poor match for T-Mobile in the United States.** SIMCom specifies LTE bands 1/3/5/7/8/20; it lacks T-Mobile's B2/B4/B12/B66/B71. B5 provides only limited possible overlap. Firmware and APN changes cannot add missing radio bands. LTE registration, SMS service, and especially VoLTE must be checked on the actual device before treating it as a phone. See [the hardware notes](docs/HARDWARE.md).
 
-This is a starter for hardware bring-up, with a firmware build and host-side protocol tests. **It was built, flashed and bench-tested on a v1.1 device on 2026-10-16.** E-paper, keyboard shortcuts, the Settings app, USB, modem/SIM response and LoRa initialization worked. The APN and light settings persisted across a restart. Wi-Fi setup joined a real network, and a Mac detected the BLE companion service; keyboard/phone pairing tests were deferred. An activated AT&T prepaid SIM subsequently registered on LTE Band 5 with `NXTGENPHONE`, and packet attachment and context 1 activation were confirmed. The earlier T-Mobile SIM did not register. See the [bench record](docs/BENCH_2026-10-16.md) for evidence and untested functions. Call audio and carrier voice support remain unverified. Continue with [NEXT_STEPS.md](NEXT_STEPS.md).
+This is experimental hobby firmware. **The native ESP-IDF/FreeRTOS build was flashed and bench-tested on a v1.1 device on 2026-10-16.** Display, physical keyboard/touch navigation, settings/key retention, Wi-Fi reconnection, LoRa initialization and AT&T LTE Band 5 registration passed. Native AI replies worked over Wi-Fi and LTE; the optimized build also completed consecutive LTE chat requests with Wi-Fi off. The user confirmed a phone call worked. One outbound SMS was delivered during earlier testing. Incoming SMS, BLE keyboard/phone pairing, a second LoRa peer, full audio-routing/quality coverage and power/battery-life measurements remain incomplete. The earlier T-Mobile SIM did not register. The latest simplified interface, airplane-mode controls, GPS/location sharing and Meshtastic leaf-client changes still need physical acceptance testing. Public release is held while these changes are checked. See the [bench record](docs/BENCH_2026-10-16.md) and [NEXT_STEPS.md](NEXT_STEPS.md).
 
 ## Included
 
 | Feature | Starter behavior |
 | --- | --- |
-| Home screen | E-paper launcher, battery reading, registration and radio status |
+| Home | Three destinations: Messages, Phone and Settings |
 | Status bar | Wi-Fi state with three bars, cellular technology with four bars, and battery percentage |
-| Conversations | One SMS thread per numeric peer, one AI thread, and one shared Nearby LoRa broadcast thread; inline composer |
+| Conversations | One SMS thread per numeric peer, one AI thread, and one shared Meshtastic channel thread; inline composer |
 | SMS | Compose/send a single GSM-7 message; prefer modem memory for reception, with SIM fallback; import supported messages from both stores |
-| AI Chat | HTTPS over connected Wi-Fi or otherwise LTE; four model presets plus Custom; replies limited to 500 characters; LTE hardware validation pending |
-| Touch | Cards, conversation rows, Send/history controls and model selection when a supported CST328/CST3530 240×320 controller is detected; hardware validation pending |
-| Phone | Dial, answer, hang up, incoming-call indication, modem call-state polling |
-| LoRa | Direct plaintext broadcasts between compatible Handheld OS peers at 915 MHz |
+| AI Chat | HTTPS over Wi-Fi or LTE, both bench-tested; four model presets plus Custom; replies limited to 500 characters |
+| Touch | Supported CST328/CST3530 240×320 controllers; CST3530 detection and the Messages/AI/Send flow passed; remaining controls need testing |
+| Phone | Numeric touch keypad, complete phone-number preview, Call/Answer/End controls and call-state polling |
+| Meshtastic | Bounded native leaf client for encrypted channel text and node information; off until configured with an explicit US region |
 | History | Last 16 combined SMS/LoRa messages in NVS, with integrity checks and duplicate filtering |
-| Settings | APN editor, cellular-carrier scan, Wi-Fi/BLE setup, light toggles and saved preferences |
+| Settings | Airplane mode, Connections, Messaging, Display, Location and About categories |
+| Location | Receive-only GPS, fix/satellite status and explicit SMS sharing of a captured Google Maps link |
 | Wi-Fi | 2.4 GHz scan, network/password entry, DHCP connection, saved credentials and forget |
 | Bluetooth LE | Keyboard discovery/HID host, authenticated phone companion service and bond controls; pairing bench tests deferred |
 | Diagnostics | USB commands, SIM/registration/signal/modem queries, keyboard tracing and log capture |
 
-LoRa uses a small [custom packet format](docs/PROTOCOL.md). It does not interoperate with Meshtastic or LoRaWAN and has no mesh routing, encryption, delivery acknowledgement, or automatic retransmission. A second compatible radio is needed to test messaging. No SMS, call, or LoRa payload is sent automatically at startup; the cellular modem is powered and attempts network registration.
+Meshtastic support is a limited native leaf client, rather than the full Meshtastic firmware. Match region, preset, channel and key on both devices. The default channel key is public and provides no privacy. This implementation does not claim forwarding, private/direct messages, PKI, delivery acknowledgements, a phone protocol or LoRaWAN. Peer interoperability is pending a second-device test. The previous custom plaintext radio protocol is replaced.
 
-Contacts, a browser, GPS, deep sleep, audio routing and a full smartphone application framework are future work. This project targets T-Deck Pro v1.0/v1.1; T-Deck Pro MAX is unsupported.
+No SMS, call, AI request, location message or mesh announcement is sent automatically at startup. Enabled cellular service registers with the network; enabled mesh listens. GPS starts off and only receives satellite data when enabled. Airplane mode suspends cellular, Wi-Fi, BLE, mesh and GPS while retaining their saved preferences. This project targets T-Deck Pro v1.0/v1.1; T-Deck Pro MAX is unsupported.
 
 ## Build and flash
 
-Use Python 3.12, Git and a C++ compiler (`g++` or `clang++`) for the host tests. The first firmware build downloads the pinned PlatformIO tools and libraries.
+Use Python 3.12, Git and a C++ compiler (`g++` or `clang++`) for the host tests. The first firmware build downloads the pinned PlatformIO tools, native ESP-IDF 5.4 SDK and RadioLib. The Arduino framework, Adafruit device wrappers and NimBLE-Arduino are not used.
 
 ```sh
 python3 -m venv .venv
@@ -59,42 +64,43 @@ Replace the port with the actual device, such as `COM5` on Windows. PlatformIO u
 
 ## Messages and controls
 
-Press **M** from Home for the conversation list. Choose **New message**, **AI Assistant**, **Nearby LoRa**, or a phone-number thread with J/K and Enter, or tap its row when touch is available. New message asks for a phone number; Enter or Continue opens its thread without sending. SMS threads group the same numeric peer with or without a leading `+`, retaining the original reply address. There is no contact address book or unread count yet. Nearby LoRa is one shared broadcast group, not private radio messaging.
+Home has **Messages**, **Phone** and **Settings**. Tap a destination, use its M/P/S shortcut, or select with J/K and Enter. **Sym** or **< Back** returns to the previous screen; **Home** in the bottom-right returns to Home.
 
-Inside a thread, **type immediately** into the composer and press **Enter** or tap **Send** to send. Ordinary N/J/K/C letters are message text. Use **Older/Newer** or **Shift + Alt + K/J** to scroll history. **Sym** or the top-left **<** goes back to the list or Home, according to where the thread was opened. E-paper refresh is slow; touches against a stale screen are ignored until redraw completes.
+Messages contains the AI Assistant, the shared Meshtastic channel and SMS conversations grouped by phone number. **New** asks for an SMS recipient; Continue opens a draft without sending. In a thread, type into the composer and press Enter or tap the separate **Send** button. Ordinary N/J/K/C keys remain message text. Older/Newer or Shift+Alt+K/J scrolls history. The **...** menu opens AI or channel settings. Leaving a thread cancels its draft; an already submitted request continues unless airplane mode cancels its radio operation. E-paper keeps its normal panel timings, coalesces typing and rejects taps against a stale image.
 
-| Screen | Keys |
+| Screen | Controls |
 | --- | --- |
-| Home | `M` Messages, `P` Phone, `L` LoRa, `D` diagnostics, `A` AI Chat, `S` Settings; use lowercase/unshifted keys |
-| Navigation | `Sym` goes back; leaving a thread cancels its draft, while an already submitted request continues |
-| Conversation list | `J/K` select a row; Enter opens it; touch selects the displayed row |
-| SMS / AI / Nearby LoRa thread | Type into the composer; Enter or Send submits; Shift + Alt + K/J scrolls older/newer history |
-| Number entry | `W/E/R` → `1/2/3`, `S/D/F` → `4/5/6`, `Z/X/C` → `7/8/9`, `P` → `0`, `O` → `+`; no Alt needed |
-| New SMS | Enter or Continue after the number opens its thread; nothing is sent until the message is submitted |
-| AI model picker | Settings I → M; J/K and Enter, or tap one of four presets / Custom |
-| Phone | Enter dials the entered number; `A` answers and `H` hangs up while a call is present |
-| Diagnostics | `R` reconnects/refreshes the modem; `I` imports both SMS stores |
-| Settings | `A` APN, `I` AI setup, `C` carrier scan, `W` Wi-Fi, `B` BLE, `F/K` lights, `D` status, `R` modem refresh |
-| Carrier scan | `R` rescan, `J/K` results pages; up to three minutes |
-| Wi-Fi | `W` radio toggle, `R` scan, `J/K` select, Enter connect, `N` hidden SSID, `F` forget |
-| BLE | `B` radio toggle, `P` phone visibility, `R` discovery, `J/K` select, Enter keyboard pairing, `C` reconnect, `F/X` forget |
-| APN editor | Enter saves and applies the APN; `Sym` cancels |
+| Home | M Messages, P Phone, S Settings; J/K and Enter also work |
+| Conversations | J/K selects, Enter opens; N or New starts an SMS |
+| Message thread | Type immediately; Enter or Send submits; Older/Newer scroll |
+| Phone | Touch digits or type the printed number legends; Call/Answer/End are separate buttons; A answers an incoming call, H ends a call |
+| Number entry | W/E/R → 1/2/3, S/D/F → 4/5/6, Z/X/C → 7/8/9, P → 0, O → + |
+| Settings | J/K and Enter or tap a row; A Airplane, C Connections, M Messaging, D Display, L Location, I About |
+| Connections | Wi-Fi, Bluetooth, Cellular; Wi-Fi and BLE have touch toggles, scan and setup controls |
+| Messaging settings | AI model/key/endpoint, or Meshtastic region/preset/channel/key and heard nodes |
+| Location | G or GPS toggles reception; S or Share by SMS prepares a captured-location draft |
+
+The touch dialer shows the whole valid international number before calling, using smaller text when needed. Carrier service and the device's audio path still determine call capability. Keypad service codes and in-call DTMF are not implemented.
 
 Hold `Shift` for uppercase and `Alt` for the printed alternate symbols when composing. The microphone key is not a voice-input feature. The e-paper display coalesces typing and refreshes slowly; USB output provides a quicker view while debugging.
 
 Outbound SMS accepts printable ASCII characters available in GSM-7, up to 160 septets; extension characters such as `{`, `}` and `\` each consume two. Incoming single-part GSM-7 and UCS-2 messages from numeric senders are supported. Multipart messages, alphanumeric senders and other encodings remain in their original SIM or modem store. New reception prefers modem (ME) storage so a full SIM does not consume all receiving space; setup falls back to SIM storage if ME reception is unavailable. Both stores are scanned at boot and by the inbox import control. UTF-8 text is retained in history and USB output; unsupported e-paper font characters appear as `?`.
 
-“Modem accepted” confirms an SMS submission, not delivery to the recipient. “Transmitted” confirms the LoRa radio completed transmission, not reception by another device. An interrupted operation may become “Result unknown”; check the receiving device before manually retrying. Stored SMS messages are never automatically deleted; a full receiving store can block new delivery.
+“Modem accepted” confirms an SMS submission, not delivery to the recipient. “Transmitted” confirms the mesh radio completed transmission, not reception by another device. An interrupted operation may become “Result unknown”; check the receiving device before manually retrying. Stored SMS messages are never automatically deleted; a full receiving store can block new delivery.
 
-## Settings app
+## Settings
 
-Press `S` on Home. Light changes save automatically in NVS; the front light is available on v1.1. The APN editor accepts 1–63 letters, digits, dots or hyphens. It suggests `fast.t-mobile.com` when no APN is saved; nothing is applied until Enter is pressed. A saved APN is applied as context 1 with `IPV4V6` when the modem is ready, and restored at boot. An explicit AI request can open LTE packet data; saving setup or starting the device does not send a provider request. A working APN cannot add radio bands or establish carrier eligibility.
+**Airplane mode** powers down or suspends all five radios. Its status distinguishes shutdown in progress from confirmed off. Radio controls and sends are unavailable while it is active; disabling airplane mode restores saved preferences. A request interrupted by airplane mode is not automatically replayed.
 
-See [connectivity setup](docs/CONNECTIVITY.md) for the carrier scan, Wi-Fi credentials, BLE keyboard support, phone GATT service and pairing controls. The ESP32-S3 supports Bluetooth LE; Bluetooth Classic keyboards are incompatible. Wi-Fi and BLE start disabled until explicitly enabled.
+**Connections** contains Wi-Fi, Bluetooth and Cellular. Cellular includes the APN editor, carrier scan and status refresh. Use your carrier's APN; a working APN cannot add radio bands or establish carrier eligibility. Wi-Fi supports saved 2.4 GHz networks. BLE provides keyboard discovery and an authenticated status-only phone companion; Bluetooth Classic keyboards are incompatible. Pairing hardware tests remain deferred.
 
-Open **AI Assistant** in Messages, press **A** from Home, or use **S → I** for its endpoint, model and masked API key. In the AI thread, **...** opens setup. The four fixed model presets are GPT-5.6 Luna, Terra, Sol and GPT-5.4 Mini; **Custom** accepts another provider model ID. A preset does not establish account access. The default is OpenAI `gpt-5.6-luna`; other providers must implement HTTPS Chat Completions.
+**Messaging → AI** contains model, masked API key and HTTPS endpoint fields. The four presets are GPT-5.6 Luna, Terra, Sol and GPT-5.4 Mini; Custom accepts another provider model ID. A preset does not establish account access. AI prefers connected Wi-Fi and otherwise uses ready LTE; both paths verify HTTPS certificates and hostname. No automatic retry switches connections. Device keys stay in NVS, and AI conversations stay in RAM. Keys and full-device backups are private; the optional [USB browser setup](installer/ai-setup.html) lets you paste a long key when served locally over localhost or HTTPS. Its public hosted page will accompany the release. See [AI setup](docs/AI_CHAT.md).
 
-AI prefers connected Wi-Fi and otherwise uses ready LTE service. Turn Wi-Fi off in Settings W to explicitly test LTE. The thread reports the connection, key presence and active transport. Both paths verify HTTPS certificates and hostname; the LTE path runs TLS on the ESP32 over a modem TCP socket. Failed requests are not automatically retried on another connection. The key stays in device settings and conversations stay in RAM. Browser key setup, physical composition and a live Wi-Fi provider reply passed on the earlier interface; the new conversation/touch UI, LTE path and 500-character enforcement still need final hardware checks. See [AI setup and controls](docs/AI_CHAT.md).
+**Messaging → Meshtastic** starts off with no region selected. Select United States only where appropriate for this 915 MHz hardware, then match preset, channel and key with your other device before enabling. Preset changes update a matching default channel name while preserving a custom name. Custom channel keys are entered as 32 or 64 hexadecimal characters and remain hidden; choosing the public default is explicit. Heard nodes lists nearby devices, with a separate explicit Announce action. Messages use one shared channel group. Channel encryption has no authentication tag; a custom key is not a delivery or sender-authenticity guarantee.
+
+**Display** controls the screen and keyboard lights; the front light is fitted on v1.1. **Location** controls receive-only GPS and shows fix/satellite status. Share by SMS requires a valid fix no more than 30 seconds old, asks for a recipient, then opens an editable message with a captured Google Maps link and capture time when available. It never sends automatically or changes the location after review. GPS reception and location-message delivery still need outdoor/recipient testing.
+
+Saved SMS/mesh history holds 16 combined messages. The screen limits rendering to the most recent 300 wrapped lines to keep memory use bounded; full stored text remains available through the private USB inbox command. **About** shows concise device and connection status, with detailed diagnostics available over USB.
 
 ## USB console
 
@@ -110,6 +116,9 @@ carriers results
 wifi
 wifi scan
 ble
+airplane status
+airplane on
+airplane off
 apn NXTGENPHONE
 light on
 keyboard-light off
@@ -134,7 +143,7 @@ sms +15551234567|Hello from Handheld OS
 dial +15551234567
 answer
 hangup
-lora Hello nearby handheld
+lora Hello channel
 ```
 
 Replace the example number with a consenting test recipient. `status` and `diag` report modem readiness, SIM state, LTE registration, signal, operator, radio status and persistence. Logs and NVS history may contain phone numbers and messages; review them before sharing.
@@ -142,9 +151,9 @@ Replace the example number with a consenting test recipient. `status` and `diag`
 ## Project layout
 
 ```text
-src/                   Board, e-paper apps, settings, modem, history and LoRa services
-lib/DeckCore/src/      Host-testable AT parser, SMS codec, keyboard and radio protocol
-lib/GxEPD2/            Pinned minimal vendor e-paper driver, including its license
+src/                   Board, e-paper apps, settings, modem, GPS, history and mesh services
+lib/DeckCore/src/      Host-testable AT/SMS/AI/mesh/NMEA parsers, keyboard, layout and canvas
+lib/GxEPD2/            Original GPL display-driver provenance and license
 boards/               T-Deck Pro ESP32-S3 / 16 MB flash profile
 config/settings.h     915 MHz radio settings and revision/modem defaults
 tests/                Protocol and parser regression tests

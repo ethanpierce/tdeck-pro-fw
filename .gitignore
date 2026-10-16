@@ -1,4 +1,6 @@
 .pio/
+/sdkconfig.tdeck-pro
+/sdkconfig.tdeck-pro.old
 .venv/
 .vscode/
 __pycache__/

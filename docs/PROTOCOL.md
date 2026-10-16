@@ -1,6 +1,33 @@
-# Handheld OS direct LoRa protocol, version 1
+# Current radio protocol
 
-This starter uses custom single-hop, plaintext broadcast packets. Both peers must use this packet format and the same physical-layer settings. Meshtastic and LoRaWAN peers will not understand it.
+The active radio service now uses the bounded Meshtastic channel protocol
+documented in [MESH.md](MESH.md). It implements channel text broadcasts and node
+information as a non-relaying leaf client. Mesh defaults off with the region
+unset, and no transmission occurs until the user explicitly configures and
+enables the US profile for the 915 MHz board.
+
+On air, a little-endian 16-byte Meshtastic header contains destination, sender,
+packet ID, flags/hops, channel hash, next-hop and relay bytes. The body is a
+protobuf Data message encrypted using channel AES-128/256-CTR. Supported
+applications are TEXT_MESSAGE_APP (1) and NODEINFO_APP (4, User protobuf). The
+nonce is packet-ID as 64-bit little endian, sender as 32-bit little endian,
+then four zero bytes. The radio uses sync word `0x2b`, a 16-symbol preamble and the
+selected Meshtastic preset. Packets are at most 255 bytes.
+
+The exact upstream reference is Meshtastic firmware
+[54e0d8d0ab2ff56b3a9ce967e53f79e49af560fb](https://github.com/meshtastic/firmware/tree/54e0d8d0ab2ff56b3a9ce967e53f79e49af560fb)
+and protobufs
+[6b1ded439633cd03d4af85b44231b91d1d106278](https://github.com/meshtastic/protobufs/tree/6b1ded439633cd03d4af85b44231b91d1d106278).
+See MESH.md for settings, limits, encryption caveats and validation. Physical
+peer interoperability remains unverified.
+
+The format below is retained as historical documentation and for old codec
+fixtures. The current service no longer transmits or receives DK packets. It
+cannot communicate with that old plaintext protocol.
+
+# Legacy direct LoRa protocol, version 1
+
+Older Handheld OS builds used custom single-hop, plaintext broadcast packets. Both peers must use this packet format and the same physical-layer settings. Meshtastic and LoRaWAN peers will not understand it.
 
 ## Default radio settings
 

@@ -42,5 +42,5 @@ int main() {
     fakeNvs::failWrites=false;
     MessageStore afterWriteFailure;afterWriteFailure.begin();
     for(const auto& message:afterWriteFailure.messages()) CHECK(std::string(message.text)!="RAM only");
-    std::cout<<checks<<" message-store checks passed with a host Preferences fake\n";
+    std::cout<<checks<<" message-store checks passed with a native NVS adapter\n";
 }

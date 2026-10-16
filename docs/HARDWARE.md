@@ -27,9 +27,12 @@ The starter detects a DRV2605 at I²C `0x5A` as a v1.1 indication. An expander a
 | Battery gauge | BQ27220 at `0x55`, state-of-charge register `0x2C` read only |
 | Keyboard backlight | 42, off |
 | E-paper front light | 45 on v1.1, off |
-| GPS power | 39, off |
+| GPS UART | ESP RX 44 ← GNSS TX; GPIO43 remains input; UART2 receive-only, 38400 baud with read-only 9600 fallback |
+| GPS power | 39; off by default, saved Settings → Location preference; forced off in Airplane mode |
 
 LILYGO's `BOARD_A7682E_TXD` / `RXD` labels are from the **modem's perspective**. Reversing this distinction is a common cause of a modem that never answers AT commands.
+
+See [GPS and location sharing](GPS.md) for GNSS controls, bounded native parsing, fresh-fix requirements and explicit SMS map-link sharing.
 
 The board uses a transistor on PWRKEY. The starter follows the vendor's GPIO-high pulse rather than treating it as a directly wired active-low modem pin. Keep the battery connected for modem tests; USB enumeration does not prove the modem has adequate power for registration and transmit bursts.
 

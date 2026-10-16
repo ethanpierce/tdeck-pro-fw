@@ -7,7 +7,7 @@
 
 enum Kind {Open,Write,Read,Close,Clock};
 struct CellTcpRequest {
-    Kind kind;std::string data;uint16_t port=0;uint32_t timeout=10000,enqueued=millis();
+    Kind kind;std::string data;uint16_t port=0;uint32_t timeout=10000,enqueued=platform::millis();
     int result=-1;int64_t timestamp=0;
     QueueHandle_t done=nullptr;std::atomic<unsigned> owners{1};
     explicit CellTcpRequest(Kind value):kind(value){done=xQueueCreate(1,sizeof(uint8_t));}
@@ -18,8 +18,9 @@ constexpr int Socket=9;
 constexpr size_t WriteLimit=768,ReadLimit=256;
 QueueHandle_t requests=nullptr;
 std::atomic<bool> readyFlag{false};
+std::atomic<bool> airplaneBlocked{false};
 bool exchange(CellTcpRequest* r) {
-    if(!requests || !r->done){r->release();return false;}
+    if(airplaneBlocked.load() || !requests || !r->done){r->release();return false;}
     r->owners.fetch_add(1);
     if(xQueueSend(requests,&r,0)!=pdTRUE){r->release();r->release();return false;}
     uint8_t token=0;
@@ -41,23 +42,27 @@ bool hostValid(const std::string& host) {
     return true;
 }
 }
-bool cellTcpReady(){return readyFlag.load();}
+bool cellTcpReady(){return !airplaneBlocked.load() && readyFlag.load();}
+void cellTcpSuspendForAirplane(bool suspended) {
+    airplaneBlocked=suspended;
+    if(suspended)readyFlag=false;
+}
 bool cellTcpOpen(const std::string& host,uint16_t port,uint32_t timeout) {
     if(!hostValid(host)||!port){return false;}
     auto* r=new(std::nothrow) CellTcpRequest(Open);if(!r){return false;}
-    r->data=host;r->port=port;r->timeout=std::min(timeout,60000u);
+    r->data=host;r->port=port;r->timeout=std::min<uint32_t>(timeout,60000u);
     if(!exchange(r)){return false;}bool ok=r->result==1;r->release();return ok;
 }
 int cellTcpWrite(const unsigned char* data,size_t size,uint32_t timeout) {
     if(!data||!size){return -1;}size=std::min(size,WriteLimit);
     auto* r=new(std::nothrow) CellTcpRequest(Write);if(!r){return -1;}
-    r->data.assign(reinterpret_cast<const char*>(data),size);r->timeout=std::min(timeout,15000u);
+    r->data.assign(reinterpret_cast<const char*>(data),size);r->timeout=std::min<uint32_t>(timeout,15000u);
     if(!exchange(r)){return -1;}int result=r->result;r->release();return result;
 }
 int cellTcpRead(unsigned char* data,size_t size,uint32_t timeout) {
     if(!data||!size){return -1;}
     auto* r=new(std::nothrow) CellTcpRequest(Read);if(!r){return -1;}
-    r->port=uint16_t(std::min(size,ReadLimit));r->timeout=std::min(timeout,15000u);
+    r->port=uint16_t(std::min(size,ReadLimit));r->timeout=std::min<uint32_t>(timeout,15000u);
     if(!exchange(r)){return -1;}int result=r->result;
     if(result>0 && size_t(result)<=size && r->data.size()==size_t(result))std::memcpy(data,r->data.data(),size_t(result));
     else if(result>0)result=-1;
@@ -90,12 +95,18 @@ bool cellTcpTestTake(void* request,int& result,std::string& data,int64_t& timest
 #endif
 void CellularSocketBroker::finish(int result,const std::string& data,int64_t timestamp) {
     if(!active_){return;}
+    if(result==-1 && diagnostic) {
+        static const char* const labels[]={"queued request","TCP mode","receive mode","network status","network open","TCP open","write","read","close","clock","TCP mode query"};
+        const char* stage=stage_>=0 && stage_<int(sizeof(labels)/sizeof(labels[0]))?labels[stage_]:"unknown stage";
+        diagnostic(std::string("LTE socket failed: ")+stage+"; "+failureCategory_+"; modem result="+std::to_string(asyncResult_));
+    }
     auto* r=active_;active_=nullptr;++generation_;
     r->result=result;r->data=data;r->timestamp=timestamp;
     uint8_t token=1;xQueueSend(r->done,&token,0);r->release();
 }
 void CellularSocketBroker::cancel() {
     opened_=false;remoteClosed_=false;poisoned_=false;readyFlag=false;
+    failureCategory_="canceled";
     finish(-1);
     CellTcpRequest* r=nullptr;
     while(requests && xQueueReceive(requests,&r,0)==pdTRUE){r->result=-1;uint8_t token=1;xQueueSend(r->done,&token,0);r->release();}
@@ -103,24 +114,27 @@ void CellularSocketBroker::cancel() {
 void CellularSocketBroker::poll(deck::AtEngine& engine,bool ready,uint32_t now) {
     engine_=&engine;readyFlag=ready && !poisoned_;
     if(active_) {
-        if(uint32_t(now-started_)>=active_->timeout){poisoned_=true;opened_=false;readyFlag=false;finish(-1);}
+        if(uint32_t(now-started_)>=active_->timeout){failureCategory_="request timeout";poisoned_=true;opened_=false;readyFlag=false;finish(-1);}
         return;
     }
     if(!engine.idle() || !requests){return;}
     CellTcpRequest* r=nullptr;if(xQueueReceive(requests,&r,0)!=pdTRUE){return;}
-    active_=r;started_=r->enqueued;ack_=received_=false;asyncResult_=-1;++generation_;
-    if(uint32_t(now-started_)>=r->timeout){finish(-1);return;}
-    if(poisoned_ || (!ready && r->kind!=Close)){finish(-1);return;}
+    active_=r;started_=r->enqueued;ack_=received_=false;asyncResult_=-1;stage_=0;failureCategory_="protocol error";++generation_;
+    if(uint32_t(now-started_)>=r->timeout){failureCategory_="queued request expired";finish(-1);return;}
+    if(poisoned_ || (!ready && r->kind!=Close)){failureCategory_=poisoned_?"connection unavailable":"data not ready";finish(-1);return;}
     if(r->kind==Open) {
         opened_=false;remoteClosed_=false;
-        command("AT+CIPMODE=0",1);
+        // The modem rejects even a redundant mode write while NETOPEN is
+        // active. Keep the packet service alive across requests and only
+        // change the mode when a read confirms that it is necessary.
+        command("AT+CIPMODE?",10);
     } else if(r->kind==Clock)command("AT+CCLK?",9);
     else if(r->kind==Close) {
         if(!opened_){finish(1);return;}
         command("AT+CIPCLOSE="+std::to_string(Socket),8);
-    } else if(!opened_)finish(-1);
+    } else if(!opened_){failureCategory_="socket not open";finish(-1);}
     else if(r->kind==Write) {
-        if(remoteClosed_){finish(-1);return;}
+        if(remoteClosed_){failureCategory_="peer closed";finish(-1);return;}
         command("AT+CIPSEND="+std::to_string(Socket)+","+std::to_string(r->data.size()),6,r->data);
     } else command("AT+CIPRXGET=3,"+std::to_string(Socket)+","+std::to_string(r->port),7);
 }
@@ -129,11 +143,12 @@ void CellularSocketBroker::command(const std::string& text,int next,const std::s
     const uint32_t generation=generation_;
     deck::AtCommand command{text,10000,payload,false,[this,next,generation](const deck::AtResult& r){completed(r,next,generation);}};
     command.appendPayloadCtrlZ=false;
-    if(!engine_->enqueue(std::move(command))){if(next==8)opened_=false;finish(-1);}
+    if(!engine_->enqueue(std::move(command))){failureCategory_="AT queue full";if(next==8)opened_=false;finish(-1);}
 }
 void CellularSocketBroker::completed(const deck::AtResult& r,int next,uint32_t generation) {
     if(!active_ || generation!=generation_){return;}
     if(!r.ok) {
+        failureCategory_=r.uncertain?"AT timeout or desynchronization":"modem error";
         if(next==7) {
             auto noDataText=[](const std::string& line){auto colon=line.find(':');return line.rfind("+IP ERROR:",0)==0 && colon!=std::string::npos && line.substr(colon+1).find_first_not_of(' ')!=std::string::npos && line.substr(colon+1).substr(line.substr(colon+1).find_first_not_of(' '))=="No data";};
             bool noData=noDataText(r.final);for(const auto& line:r.lines)if(noDataText(line))noData=true;
@@ -144,16 +159,30 @@ void CellularSocketBroker::completed(const deck::AtResult& r,int next,uint32_t g
         if(r.uncertain){poisoned_=true;opened_=false;readyFlag=false;}
         finish(-1);return;
     }
-    if(next==1)command("AT+CIPRXGET=1",2);
+    if(next==10) {
+        int mode=-1;bool seen=false,bad=false;
+        for(const auto& line:r.lines) {
+            if(seen || line.rfind("+CIPMODE:",0)!=0){bad=true;break;}
+            seen=true;const auto start=line.find_first_not_of(" \t",9);
+            const auto value=start==std::string::npos?std::string():line.substr(start);
+            if(value!="0" && value!="1"){bad=true;break;}
+            mode=value=="1"?1:0;
+        }
+        if(bad || !seen){failureCategory_="invalid TCP mode";finish(-1);}
+        else if(mode==0)command("AT+CIPRXGET=1",2);
+        else command("AT+CIPMODE=0",1);
+    }
+    else if(next==1)command("AT+CIPRXGET=1",2);
     else if(next==2)command("AT+NETOPEN?",3);
     else if(next==3) {
         int state=-1;for(const auto& line:r.lines)if(line.rfind("+NETOPEN:",0)==0){auto f=fields(line);if(f.size()==1)state=integer(f[0],1);}
         if(state==1)command("AT+CIPOPEN="+std::to_string(Socket)+",\"TCP\",\""+active_->data+"\","+std::to_string(active_->port),5);
         else if(state==0)command("AT+NETOPEN",4);
-        else finish(-1);
+        else {failureCategory_="invalid network status";finish(-1);}
     } else if(next==4 || next==5 || next==6 || next==8){ack_=true;advance();}
     else if(next==9) {
         int64_t timestamp=0;for(const auto& line:r.lines)if(line.rfind("+CCLK:",0)==0)timestamp=deck::cellClockUtc(line);
+        if(!timestamp)failureCategory_="invalid clock";
         finish(timestamp?1:-1,"",timestamp);
     } else if(next==7) {
         int count=-1;std::string data;bool header=false,bad=false;
@@ -166,13 +195,13 @@ void CellularSocketBroker::completed(const deck::AtResult& r,int next,uint32_t g
                 if(!deck::cellHex(line,size_t(count),data)){bad=true;break;}
             } else {bad=true;break;}
         }
-        if(bad || !header || count<0 || data.size()!=size_t(count)){poisoned_=true;opened_=false;readyFlag=false;finish(-1);}
+        if(bad || !header || count<0 || data.size()!=size_t(count)){failureCategory_="invalid receive frame";poisoned_=true;opened_=false;readyFlag=false;finish(-1);}
         else finish(count?count:(remoteClosed_?-2:0),data);
     }
 }
 void CellularSocketBroker::advance() {
     if(!active_ || !ack_ || !received_){return;}
-    if(asyncResult_!=0){if(stage_==6){poisoned_=true;opened_=false;readyFlag=false;}finish(-1);return;}
+    if(asyncResult_!=0){failureCategory_="asynchronous modem error";if(stage_==6){poisoned_=true;opened_=false;readyFlag=false;}finish(-1);return;}
     if(stage_==4)command("AT+CIPOPEN="+std::to_string(Socket)+",\"TCP\",\""+active_->data+"\","+std::to_string(active_->port),5);
     else if(stage_==5){opened_=true;remoteClosed_=false;finish(1);}
     else if(stage_==6)finish(int(active_->data.size()));
@@ -181,7 +210,7 @@ void CellularSocketBroker::advance() {
 void CellularSocketBroker::onUrc(const std::string& line) {
     auto f=fields(line);
     if(line.rfind("+IPCLOSE:",0)==0 && f.size()>=1 && integer(f[0],9)==Socket){remoteClosed_=true;return;}
-    if(line.rfind("+CIPEVENT:",0)==0){opened_=false;finish(-1);return;}
+    if(line.rfind("+CIPEVENT:",0)==0){failureCategory_="network closed";opened_=false;finish(-1);return;}
     if(!active_){return;}
     if(stage_==4 && line.rfind("+NETOPEN:",0)==0 && f.size()==1)asyncResult_=integer(f[0]);
     else if(stage_==5 && line.rfind("+CIPOPEN:",0)==0 && f.size()==2 && integer(f[0],9)==Socket)asyncResult_=integer(f[1]);

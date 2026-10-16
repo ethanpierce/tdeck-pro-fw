@@ -14,6 +14,12 @@
 QueueHandle_t cellEvents=nullptr, cellActions=nullptr;
 std::atomic<uint32_t> droppedCellEvents{0};
 namespace {
+std::atomic<bool> airplaneSuspended{false},powerStopped{true};
+std::atomic<uint32_t> powerCycle{0},startingCycle{0};
+std::string initialApn;
+bool powerPermitted() {
+    return !airplaneSuspended.load() && powerCycle.load()==startingCycle.load();
+}
 constexpr uint32_t ReconnectMs=5000, PollMs=15000, CallPollMs=3000;
 const char* const DiagnosticCommands[]={"AT+CPIN?","AT+CEREG?","AT+CREG?","AT+CSQ","AT+COPS?",
     "AT+CGMM","AT+CGMR","AT+CFUN?","AT+CPSI?"};
@@ -52,20 +58,55 @@ std::string callerNumber(const std::vector<std::string>& fields, size_t index) {
 }
 class CellService {
 public:
-    CellService(): engine_([](const std::string& data){Serial1.write(reinterpret_cast<const uint8_t*>(data.data()),data.size());},
-        [this](const std::string& line){urc(line);}) {}
+    CellService(): engine_([](const std::string& data){if(powerPermitted())platform::modemUart.write(reinterpret_cast<const uint8_t*>(data.data()),data.size());},
+        [this](const std::string& line){urc(line);}) {apn_=initialApn;tcp_.diagnostic=[](const std::string& text){emit(CellEventKind::Trace,text);};}
     void run() {
         tcp_.begin();
-        Serial1.setRxBufferSize(8192);
-        Serial1.begin(DECK_MODEM_BAUD,SERIAL_8N1,board::ModemEspRx,board::ModemEspTx);
-        board::startModemPower();
-        begin();
+        platform::modemUart.setRxBufferSize(8192);
+        platform::modemUart.begin(DECK_MODEM_BAUD,board::ModemEspRx,board::ModemEspTx);
+        bool powered=false,announced=false;
+        uint32_t observedCycle=powerCycle.load();
         for (;;) {
-            engine_.tick(millis());
-            while (Serial1.available()) engine_.feed(char(Serial1.read()));
+            if(airplaneSuspended.load() || observedCycle!=powerCycle.load()) {
+                if(powered || !announced || observedCycle!=powerCycle.load()) {
+                    board::stopModemPower();
+                    powerStopped=true;
+                    // Invalidate callbacks before resetting the AT engine. A
+                    // submitted SMS becomes unknown and is never replayed.
+                    offline("Airplane mode: cellular off");
+                    engine_.reset("Airplane mode; previous result unknown");
+                    smsBusy_=false;
+                    emit(CellEventKind::Registration,"",-1);
+                    emit(CellEventKind::Signal,"",0);
+                    emit(CellEventKind::Sim,"Off",0);
+                    emit(CellEventKind::Operator,"",0);
+                    emit(CellEventKind::System,"",0);
+                    emit(CellEventKind::Call,"Call ended by Airplane mode",-1);
+                    announced=true;
+                }
+                powered=false;
+                observedCycle=powerCycle.load();
+                rejectActions();
+                tcp_.cancel();
+                while(platform::modemUart.available())platform::modemUart.read();
+                if(airplaneSuspended.load()){vTaskDelay(pdMS_TO_TICKS(5));continue;}
+            }
+            if(!powered) {
+                startingCycle=powerCycle.load();
+                powerStopped=false;
+                if(!board::startModemPower(powerPermitted)) {
+                    board::stopModemPower();powerStopped=true;continue;
+                }
+                observedCycle=startingCycle.load();
+                powered=true;announced=false;
+                begin();
+            }
+            engine_.tick(platform::millis());
+            while (powerPermitted() && platform::modemUart.available()) engine_.feed(char(platform::modemUart.read()));
+            if(!powerPermitted())continue;
             CellAction action{};
             if (xQueueReceive(cellActions,&action,0)==pdTRUE) handle(action);
-            uint32_t now=millis();
+            uint32_t now=platform::millis();
             tcp_.poll(engine_,linked_ && sim_ && registered() && !configuring_ && !smsConfiguring_ && !smsBusy_ && !scanning_ && !inCall_ && !apnPending_,now);
             if (engine_.idle() && !tcp_.busy()) {
                 // Only enqueue a call when the UART is free. A queued hangup can
@@ -91,6 +132,15 @@ public:
         }
     }
 private:
+    void rejectActions() {
+        CellAction a{};
+        while(xQueueReceive(cellActions,&a,0)==pdTRUE) {
+            if(a.kind==CellActionKind::Sms)emit(CellEventKind::Failed,"Airplane mode. Message not sent.",0,a.id);
+            else if(a.kind==CellActionKind::SetApn && deck::validApn(a.text)) {
+                apn_=a.text;apnPending_=true; // Apply only after the user restores radios.
+            }
+        }
+    }
     bool smsReady() const { return linked_ && sim_ && pdu_ && storage_ && notifications_; }
     bool registered() const { return reg_==1 || reg_==5 || reg_==9 || reg_==10; }
     bool smsRegistered() const { return registered() || reg_==6 || reg_==7; }
@@ -102,7 +152,7 @@ private:
         smsSetupAttempted_=scanAttempted_=meScanAttempted_=scanning_=false;
         scanRequired_=meScanRequired_=meStorageAvailable_=true; simStatus_.clear(); reg_=-1;
         diagnosticStep_=diagnosticCount_=0;
-        lastConnect_=millis();
+        lastConnect_=platform::millis();
         if (hasPendingCall_) {
             hasPendingCall_=false;
             emit(CellEventKind::Call,"Call command cancelled while modem reconnects",-1);
@@ -191,7 +241,7 @@ private:
     }
     void diagnostics(bool full) {
         if (!linked_) return;
-        diagnosticStep_=0; diagnosticCount_=full?9:5; lastPoll_=millis();
+        diagnosticStep_=0; diagnosticCount_=full?9:5; lastPoll_=platform::millis();
     }
     void simStatus(const std::string& status) {
         bool ready=status=="READY";
@@ -311,7 +361,7 @@ private:
         if (scanning_) return;
         // Stream each header/PDU pair; SIM capacity must not determine heap use.
         auto header=std::make_shared<std::string>();
-        scanning_=true; scanRequired_=false; scanAttempted_=true; lastScan_=millis();
+        scanning_=true; scanRequired_=false; scanAttempted_=true; lastScan_=platform::millis();
         nextScanMe_=true;
         const uint32_t generation=generation_,simGeneration=simGeneration_;
         deck::AtCommand command{"AT+CMGL=4",30000,"",false,
@@ -343,7 +393,7 @@ private:
             if (!r.ok || generation!=generation_) return;
             // Count the interval from completion so a slow CLCC response does
             // not cause another CLCC immediately and starve inbox/diagnostics.
-            lastCallPoll_=millis();
+            lastCallPoll_=platform::millis();
             int selected=-1, rank=-1;
             std::string peer;
             static const char* names[]={"Active","Held","Dialing","Ringing remotely","Incoming call","Waiting call"};
@@ -427,7 +477,7 @@ private:
     }
     void modemInbox(bool raw) {
         const uint32_t generation=generation_,simGeneration=simGeneration_;
-        scanning_=true;meScanRequired_=false;meScanAttempted_=true;lastMeScan_=millis();
+        scanning_=true;meScanRequired_=false;meScanAttempted_=true;lastMeScan_=platform::millis();
         nextScanMe_=false;
         // CPMS mem1 controls CMGL/CMGR; leave mem2 and receive preference mem3 unchanged.
         // Mark storage unavailable before the swap so an interleaved SM CMTI is
@@ -436,7 +486,7 @@ private:
         emit(CellEventKind::SmsReady,"",0);
         if(raw) emit(CellEventKind::Trace,"Inspecting ME inbox; raw messages may contain private data. Reads may mark messages read; none are deleted.");
         send("AT+CPMS=\"ME\"",[this,generation,simGeneration,raw](const deck::AtResult& selected){
-            if(selected.uncertain) {meReadFailed_=true;lastMeFailure_=millis();}
+            if(selected.uncertain) {meReadFailed_=true;lastMeFailure_=platform::millis();}
             if(generation!=generation_ || simGeneration!=simGeneration_ || !linked_) return;
             if(raw) traceLines(selected);
             if(!selected.ok) {
@@ -453,7 +503,7 @@ private:
                     if(r.uncertain) {
                         offline("ME inbox timeout; reconnecting to restore SIM storage");
                         // Retry reads only after a pause; submitted SMS is never repeated.
-                        meReadFailed_=true;lastMeFailure_=millis();return;
+                        meReadFailed_=true;lastMeFailure_=platform::millis();return;
                     }
                     if(r.ok) meReadFailed_=false;
                     if(!r.ok || !header->empty()) meScanRequired_=true;
@@ -483,7 +533,8 @@ private:
         static const char* allowed[]={"AT+CGDCONT?","AT+CGATT?","AT+CGACT?","AT+CNMP?",
             "AT+CNBP?","AT+CEER","AT+CEREG?","AT+CGREG?","AT+CEREG=?",
             "AT+CFUN?","AT+CSQ","AT+COPS?","AT+CPSI?","AT+COPS=?","AT+CGSN","AT+CIMI","AT+CMGL=4",
-            "AT+CPMS?","AT+CNMI?","AT+CSMS?","AT+CGSMS?",
+            "AT+CPMS?","AT+CNMI?","AT+CSMS?","AT+CGSMS?","AT+CMGF?","AT+CATR?",
+            "AT+NETOPEN?","AT+CIPOPEN?","AT+CIPMODE?","AT+CSOCKSETPN?","AT+CIPTIMEOUT?",
             "AT*IMSRCFG=\"switch\"","AT*IMSREAD","AT+CSDVC?","AT+CSDVC=?",
             "AT+CMUT?","AT+VMUTE?","AT+CMICGAIN?","AT+COUTGAIN?","AT+CLCC"};
         bool accepted=false;
@@ -499,6 +550,10 @@ private:
         },cmd=="AT+COPS=?"?180000:cmd=="AT+CMGL=4"?30000:10000);
     }
     void handle(const CellAction& a) {
+        if(!powerPermitted()) {
+            if(a.kind==CellActionKind::Sms)emit(CellEventKind::Failed,"Airplane mode. Message not sent.",0,a.id);
+            return;
+        }
         // Keep explicit modem setup/diagnostics out of the TLS socket lease.
         // SMS and call controls remain serialized by the same AT engine; inbox
         // notifications are still retained and imported without deletion.
@@ -602,7 +657,16 @@ private:
 };
 void worker(void*) { CellService service; service.run(); }
 }
-bool startCellTask() {
+void cellSuspendForAirplane(bool suspended) {
+    if(suspended) {
+        airplaneSuspended=true;
+        powerCycle.fetch_add(1);
+    } else airplaneSuspended=false;
+    cellTcpSuspendForAirplane(suspended);
+}
+bool cellAirplaneStopped(){return powerStopped.load();}
+bool startCellTask(const char* savedApn) {
+    initialApn=savedApn && deck::validApn(savedApn)?savedApn:"";
     cellEvents=xQueueCreate(24,sizeof(CellEvent));
     cellActions=xQueueCreate(6,sizeof(CellAction));
     if (cellEvents && cellActions && xTaskCreatePinnedToCore(worker,"cellular",12288,nullptr,2,nullptr,0)==pdPASS) return true;

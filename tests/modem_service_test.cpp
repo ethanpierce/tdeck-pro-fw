@@ -1,4 +1,4 @@
-#include <Arduino.h>
+#include <platform.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <at_engine.h>
@@ -17,35 +17,41 @@
 #endif
 // Exercise the actual UART-owner loop with fake hardware and a deterministic clock.
 #include "../src/modem_task.cpp"
-FakeSerial Serial1;
+platform::FakeUart platform::modemUart;
 struct StopSimulation {};
 uint32_t current=0,until=0;
 std::function<void()> tickHook;
-uint32_t millis(){return current;}
+uint32_t platform::millis(){return current;}
 void vTaskDelay(TickType_t dt){current+=dt;if(tickHook)tickHook();if(current>=until)throw StopSimulation{};}
-namespace board {void startModemPower(){}}
+unsigned modemStarts=0,modemStops=0;
+namespace board {
+bool startModemPower(bool (*allowed)()) {if(allowed && !allowed())return false;++modemStarts;return true;}
+void stopModemPower(){++modemStops;}
+}
 struct Harness {
     CellService service;
     std::vector<std::pair<uint32_t,std::string>> tx;
     std::map<std::string,unsigned> count;
     std::function<bool(const std::string&,unsigned)> custom;
     Harness(uint32_t stop) {
-        current=0;until=stop;tickHook={};Serial1.rx.clear();
+        current=0;until=stop;tickHook={};platform::modemUart.rx.clear();
+        cellSuspendForAirplane(false);modemStarts=modemStops=0;
         if(cellEvents)vQueueDelete(cellEvents);
         if(cellActions)vQueueDelete(cellActions);
         cellEvents=xQueueCreate(4096,sizeof(CellEvent));cellActions=xQueueCreate(6,sizeof(CellAction));
-        Serial1.onWrite=[this](std::string wire){
+        platform::modemUart.onWrite=[this](std::string wire){
             tx.push_back({current,wire});
             std::string cmd=wire;if(!cmd.empty()&&cmd.back()=='\r')cmd.pop_back();
             unsigned n=++count[cmd];
             if(custom&&custom(cmd,n))return;
-            if(cmd=="AT+CPIN?")Serial1.feed("\r\n+CPIN: READY\r\nOK\r\n");
-            else if(cmd=="AT+CEREG?")Serial1.feed("\r\n+CEREG: 2,1\r\nOK\r\n");
-            else if(cmd=="AT+CREG?")Serial1.feed("\r\n+CREG: 2,1\r\nOK\r\n");
-            else if(cmd=="AT+CSQ")Serial1.feed("\r\n+CSQ: 20,99\r\nOK\r\n");
-            else if(cmd.rfind("AT+CMGS=",0)==0)Serial1.feed("\r\n> ");
-            else if(!wire.empty()&&wire.back()=='\x1a')Serial1.feed("\r\n+CMGS: 1\r\nOK\r\n");
-            else if(cmd!="\x1b")Serial1.feed("\r\nOK\r\n");
+            if(cmd=="AT+CPIN?")platform::modemUart.feed("\r\n+CPIN: READY\r\nOK\r\n");
+            else if(cmd=="AT+CEREG?")platform::modemUart.feed("\r\n+CEREG: 2,1\r\nOK\r\n");
+            else if(cmd=="AT+CREG?")platform::modemUart.feed("\r\n+CREG: 2,1\r\nOK\r\n");
+            else if(cmd=="AT+CSQ")platform::modemUart.feed("\r\n+CSQ: 20,99\r\nOK\r\n");
+            else if(cmd=="AT+CIPMODE?")platform::modemUart.feed("\r\n+CIPMODE: 0\r\nOK\r\n");
+            else if(cmd.rfind("AT+CMGS=",0)==0)platform::modemUart.feed("\r\n> ");
+            else if(!wire.empty()&&wire.back()=='\x1a')platform::modemUart.feed("\r\n+CMGS: 1\r\nOK\r\n");
+            else if(cmd!="\x1b")platform::modemUart.feed("\r\nOK\r\n");
         };
     }
     void run(){try{service.run();}catch(const StopSimulation&) {}}
@@ -57,12 +63,43 @@ struct Harness {
 };
 int main(){
     {
+        Harness h(2000);cellSuspendForAirplane(true);
+        tickHook=[&]{if(current==100)h.action(CellActionKind::Sms,711);if(current==200)h.action(CellActionKind::Dial);};
+        h.run();assert(h.tx.empty() && modemStarts==0 && modemStops>0 && cellAirplaneStopped() && !cellTcpReady());
+        bool rejected=false;for(const auto& event:h.events())if(event.kind==CellEventKind::Failed && event.id==711)rejected=event.value==0;
+        assert(rejected);std::cout<<"PASS persisted Airplane mode never powers modem or transmits queued SMS/call\n";
+    }
+    {
+        Harness h(6000);
+        h.custom=[&](const std::string& cmd,unsigned){return !cmd.empty() && cmd.back()=='\x1a';};
+        tickHook=[&]{
+            if(current==500)h.action(CellActionKind::Sms,712);
+            if(current==600){cellSuspendForAirplane(true);h.action(CellActionKind::Sms,713);h.action(CellActionKind::Dial);}
+            if(current==1600)cellSuspendForAirplane(false);
+        };
+        h.run();assert(h.totalPrefix("AT+CMGS=")==1 && h.totalPrefix("ATD")==0 && modemStarts==2);
+        for(const auto& item:h.tx)assert(item.first<600 || item.first>=1600);
+        const bool restored=h.smsReady();
+        bool unknown=false,rejected=false;for(const auto& event:h.events())if(event.kind==CellEventKind::Failed) {
+            if(event.id==712)unknown=event.value==1;
+            if(event.id==713)rejected=event.value==0;
+        }
+        assert(unknown && rejected && restored);
+        std::cout<<"PASS Airplane mode cancels in-flight SMS as unknown, drops queued sends, restores without replay\n";
+    }
+    {
+        Harness h(6000);
+        tickHook=[&]{if(current==500){h.action(CellActionKind::Dial);cellSuspendForAirplane(true);cellSuspendForAirplane(false);}};
+        h.run();assert(modemStarts==2 && modemStops>0 && h.totalPrefix("ATD")==0 && h.smsReady());
+        std::cout<<"PASS rapid Airplane on/off still power-cycles and discards an unsent dial\n";
+    }
+    {
         Harness h(62000);uint32_t readyAt=0;
         h.custom=[&](const std::string& cmd,unsigned n){
             if(cmd=="AT"&&n<3)return true;
-            if(cmd=="AT+CPIN?"&&n==1){Serial1.feed("+CPIN: SIM PIN\r\nOK\r\n");return true;}
+            if(cmd=="AT+CPIN?"&&n==1){platform::modemUart.feed("+CPIN: SIM PIN\r\nOK\r\n");return true;}
             if(cmd=="AT+CPIN?"&&n==2)readyAt=current;
-            if(cmd=="AT+CPMS=\"SM\",\"SM\",\"ME\""&&n==1){Serial1.feed("+CMS ERROR: 310\r\n");return true;}
+            if(cmd=="AT+CPMS=\"SM\",\"SM\",\"ME\""&&n==1){platform::modemUart.feed("+CMS ERROR: 310\r\n");return true;}
             return false;
         };
         h.run();assert(h.count["AT"]==3);assert(readyAt>15000);assert(h.count["AT+CMGF=0"]==2);
@@ -73,7 +110,7 @@ int main(){
     {
         Harness h(2000);
         h.custom=[&](const std::string& cmd,unsigned){return cmd=="AT+CPSI?";};
-        tickHook=[&]{if(current==500)h.action(CellActionKind::Dial);if(current==505)h.action(CellActionKind::Hangup);if(current==1000)Serial1.feed("OK\r\n");};
+        tickHook=[&]{if(current==500)h.action(CellActionKind::Dial);if(current==505)h.action(CellActionKind::Hangup);if(current==1000)platform::modemUart.feed("OK\r\n");};
         h.run();assert(h.totalPrefix("ATD")==0);assert(h.count["AT+CHUP"]==1);
         std::cout<<"PASS hangup replaces unsent dial\n";
     }
@@ -90,7 +127,7 @@ int main(){
     {
         Harness h(9000);
         h.custom=[&](const std::string& cmd,unsigned){return !cmd.empty()&&cmd.back()=='\x1a';};
-        tickHook=[&]{if(current==500)h.action(CellActionKind::Sms,99);if(current==600)Serial1.feed("RDY\r\n");};
+        tickHook=[&]{if(current==500)h.action(CellActionKind::Sms,99);if(current==600)platform::modemUart.feed("RDY\r\n");};
         h.run();assert(h.totalPrefix("AT+CMGS=")==1);assert(h.count["AT"]==2);assert(h.smsReady());
         bool unknown=false;for(const auto& e:h.events())if(e.kind==CellEventKind::Failed&&e.id==99)unknown=e.value==1;
         assert(unknown);std::cout<<"PASS modem restart mid-SMS marks unknown and reconfigures\n";
@@ -99,7 +136,7 @@ int main(){
         Harness h(1000);h.custom=[&](const std::string& cmd,unsigned){
             if(cmd!="AT+CMGL=4")return false;
             std::string result;for(int i=0;i<100;++i){char time[32];snprintf(time,sizeof(time),"6210610000%02X00",i);result+="+CMGL: "+std::to_string(i+1)+",1,,20\r\n00000B915155214365F70000"+std::string(time)+"05E8329BFD06\r\n";}
-            Serial1.feed(result+"OK\r\n");return true;
+            platform::modemUart.feed(result+"OK\r\n");return true;
         };
         h.run();assert(h.smsReady());
         unsigned received=0;for(const auto& e:h.events())if(e.kind==CellEventKind::SmsIn)++received;
@@ -112,7 +149,7 @@ int main(){
             if(cmd!="AT+CLCC")return false;
             replyAt=current+3500;return true;
         };
-        tickHook=[&]{if(current==replyAt)Serial1.feed("+CLCC: 1,0,0,0,0,\"15551234567\",145\r\nOK\r\n");};
+        tickHook=[&]{if(current==replyAt)platform::modemUart.feed("+CLCC: 1,0,0,0,0,\"15551234567\",145\r\nOK\r\n");};
         h.run();assert(h.smsReady());assert(h.count["AT+CPIN?"]>=2);
         std::cout<<"PASS slow call queries leave time for SIM diagnostics and SMS setup\n";
     }
@@ -121,7 +158,7 @@ int main(){
         const std::string write="AT+CGDCONT=1,\"IPV4V6\",\"fast.t-mobile.com\"";
         h.custom=[&](const std::string& cmd,unsigned){
             if(cmd=="AT+CGDCONT?") {
-                Serial1.feed(applied?"+CGDCONT: 1,\"IPV4V6\",\"fast.t-mobile.com\"\r\nOK\r\n":
+                platform::modemUart.feed(applied?"+CGDCONT: 1,\"IPV4V6\",\"fast.t-mobile.com\"\r\nOK\r\n":
                     "+CGDCONT: 1,\"IP\",\"old.apn\"\r\nOK\r\n");return true;
             }
             if(cmd==write) applied=true;
@@ -144,7 +181,7 @@ int main(){
         h.custom=[&](const std::string& cmd,unsigned){if(cmd!="AT+COPS=?")return false;replyAt=current+90000;return true;};
         tickHook=[&]{
             if(current==1000)h.request(CellActionKind::NetworkQuery,"AT+COPS=?");
-            if(replyAt && current==replyAt)Serial1.feed("+COPS: (1,\"Test LTE\",\"Test\",\"310260\",7)\r\nOK\r\n");
+            if(replyAt && current==replyAt)platform::modemUart.feed("+COPS: (1,\"Test LTE\",\"Test\",\"310260\",7)\r\nOK\r\n");
         };
         h.run();assert(h.count["AT+COPS=?"]==1 && h.count["AT"]==1);
         bool completed=false;for(const auto& e:h.events())if(e.kind==CellEventKind::Trace&&std::string(e.text)=="AT+COPS=?: OK")completed=true;
@@ -156,7 +193,7 @@ int main(){
         h.custom=[&](const std::string& cmd,unsigned){if(cmd!="AT+COPS=?")return false;replyAt=current+60000;return true;};
         tickHook=[&]{
             if(current==1000)h.action(CellActionKind::CarrierScan);
-            if(replyAt && current==replyAt)Serial1.feed("+COPS: (1,\"Test LTE\",\"Test\",\"310260\",7)\r\nOK\r\n");
+            if(replyAt && current==replyAt)platform::modemUart.feed("+COPS: (1,\"Test LTE\",\"Test\",\"310260\",7)\r\nOK\r\n");
         };
         h.run();bool started=false,entry=false,done=false;
         for(const auto& e:h.events()) {
@@ -172,7 +209,7 @@ int main(){
         const std::string write="AT+CGDCONT=1,\"IPV4V6\",\"NXTGENPHONE\"";
         h.custom=[&](const std::string& cmd,unsigned){
             if(cmd=="AT+CGDCONT?") {
-                Serial1.feed(applied?"+CGDCONT: 1,\"IPV4V6\",\"NXTGENPHONE\"\r\nOK\r\n":
+                platform::modemUart.feed(applied?"+CGDCONT: 1,\"IPV4V6\",\"NXTGENPHONE\"\r\nOK\r\n":
                     "+CGDCONT: 1,\"IP\",\"old.apn\"\r\nOK\r\n");return true;
             }
             if(cmd==write)applied=true;
@@ -205,7 +242,7 @@ int main(){
         h.custom=[&](const std::string& cmd,unsigned){if(cmd!="AT+COPS=0")return false;replyAt=current+90000;return true;};
         tickHook=[&]{
             if(current==1000)h.action(CellActionKind::SelectAutomatic);
-            if(replyAt && current==replyAt)Serial1.feed("OK\r\n");
+            if(replyAt && current==replyAt)platform::modemUart.feed("OK\r\n");
         };
         h.run();assert(h.count["AT+COPS=0"]==1 && h.count["AT"]==1 && h.count["AT+CGMM"]==2);
         assert(h.totalPrefix("AT+CMGS=")==0 && h.totalPrefix("ATD")==0);
@@ -219,13 +256,13 @@ int main(){
             if(cmd=="AT+CPMS=\"ME\"") {
                 store="ME";
                 // A SIM notification must not read slot 7 from the temporarily selected ME store.
-                Serial1.feed("+CPMS: 1,100,0,100,0,100\r\nOK\r\n+CMTI: \"SM\",7\r\n");return true;
+                platform::modemUart.feed("+CPMS: 1,100,0,100,0,100\r\nOK\r\n+CMTI: \"SM\",7\r\n");return true;
             }
             if(cmd=="AT+CPMS=\"SM\"")store="SM";
             if(cmd.rfind("AT+CMGR=",0)==0)assert(store=="SM");
             if(cmd!="AT+CMGL=4")return false;
-            if(store=="SM") {++smScans;Serial1.feed("OK\r\n");}
-            else {++meScans;Serial1.feed("+CMGL: 7,0,,20\r\n"+pdu+"\r\nOK\r\n");}
+            if(store=="SM") {++smScans;platform::modemUart.feed("OK\r\n");}
+            else {++meScans;platform::modemUart.feed("+CMGL: 7,0,,20\r\n"+pdu+"\r\nOK\r\n");}
             return true;
         };
         tickHook=[&]{if(current==500)h.request(CellActionKind::NetworkQuery,"inbox-me");};
@@ -241,7 +278,7 @@ int main(){
         Harness h(2000);
         h.custom=[&](const std::string& cmd,unsigned){
             if(cmd!="AT+CPMS=\"ME\"")return false;
-            Serial1.feed("+CMS ERROR: 302\r\n");return true;
+            platform::modemUart.feed("+CMS ERROR: 302\r\n");return true;
         };
         tickHook=[&]{if(current==500)h.request(CellActionKind::NetworkQuery,"inbox-me");};
         h.run();assert(h.smsReady() && h.count["AT+CPMS=\"SM\""]==2 && h.count["AT+CMGL=4"]==1);
@@ -252,7 +289,7 @@ int main(){
         h.custom=[&](const std::string& cmd,unsigned){
             if(cmd=="AT+CPMS=\"ME\"")store="ME";
             if(cmd=="AT+CPMS=\"SM\"") {
-                Serial1.feed("+CMS ERROR: 310\r\n+CMTI: \"SM\",4\r\n");return true;
+                platform::modemUart.feed("+CMS ERROR: 310\r\n+CMTI: \"SM\",4\r\n");return true;
             }
             if(cmd=="AT+CPMS=\"SM\",\"SM\",\"SM\"" || cmd=="AT+CPMS=\"SM\",\"SM\",\"ME\"")store="SM";
             if(cmd=="AT+CMGL=4" && store=="ME")++meScans;
@@ -296,7 +333,7 @@ int main(){
         const std::string carrier="00400B915155214365F70000621061000000000B050003CC0201E8329BFD06";
         h.custom=[&](const std::string& cmd,unsigned){
             if(cmd=="AT+CPMS=\"SM\",\"SM\",\"ME\"") {
-                store="SM";receive="ME";Serial1.feed("+CPMS: 5,5,5,5,1,180\r\nOK\r\n");return true;
+                store="SM";receive="ME";platform::modemUart.feed("+CPMS: 5,5,5,5,1,180\r\nOK\r\n");return true;
             }
             if(cmd=="AT+CPMS=\"ME\"")store="ME";
             if(cmd=="AT+CPMS=\"SM\"")store="SM";
@@ -309,10 +346,10 @@ int main(){
                 ++meScans;result="+CMGL: 1,0,,20\r\n"+first+"\r\n";
                 if(second)result+="+CMGL: 2,0,,20\r\n"+later+"\r\n";
             }
-            Serial1.feed(result+"OK\r\n");return true;
+            platform::modemUart.feed(result+"OK\r\n");return true;
         };
         tickHook=[&]{
-            if(current==500){second=true;Serial1.feed("+CMTI: \"ME\",2\r\n");}
+            if(current==500){second=true;platform::modemUart.feed("+CMTI: \"ME\",2\r\n");}
             if(current==1000)h.action(CellActionKind::ReadInbox);
         };
         h.run();assert(h.smsReady() && store=="SM" && receive=="ME" && smScans==2 && meScans==3);
@@ -332,18 +369,18 @@ int main(){
         const std::string first="00000B915155214365F700006210610000000005E8329BFD06";
         h.custom=[&](const std::string& cmd,unsigned){
             if(cmd=="AT+CPMS=\"SM\",\"SM\",\"ME\"" || cmd=="AT+CPMS=\"ME\"") {
-                Serial1.feed("+CMS ERROR: 302\r\n");return true;
+                platform::modemUart.feed("+CMS ERROR: 302\r\n");return true;
             }
             if(cmd=="AT+CPMS=\"SM\",\"SM\",\"SM\"") {
-                store="SM";Serial1.feed("+CPMS: 5,5,5,5,5,5\r\nOK\r\n");return true;
+                store="SM";platform::modemUart.feed("+CPMS: 5,5,5,5,5,5\r\nOK\r\n");return true;
             }
             if(cmd=="AT+CPMS=\"SM\"")store="SM";
             if(cmd.rfind("AT+CMGR=",0)==0) {
-                assert(store=="SM");Serial1.feed("+CMGR: 0,,20\r\n"+first+"\r\nOK\r\n");return true;
+                assert(store=="SM");platform::modemUart.feed("+CMGR: 0,,20\r\n"+first+"\r\nOK\r\n");return true;
             }
             return false;
         };
-        tickHook=[&]{if(current==500)Serial1.feed("+CMTI: \"SM\",3\r\n");};
+        tickHook=[&]{if(current==500)platform::modemUart.feed("+CMTI: \"SM\",3\r\n");};
         h.run();assert(h.smsReady() && h.count["AT+CPMS=\"SM\",\"SM\",\"SM\""]==1 && h.count["AT+CPMS=\"ME\""]==1);
         bool warned=false;
         for(const auto& e:h.events()) {
@@ -360,7 +397,7 @@ int main(){
             if(cmd=="AT+CPMS=\"SM\"")store="SM";
             if(cmd.rfind("AT+CMGR=",0)==0)assert(store=="SM");
             if(cmd!="AT+CMGL=4")return false;
-            if(store=="SM") {++smScans;Serial1.feed("OK\r\n");return true;}
+            if(store=="SM") {++smScans;platform::modemUart.feed("OK\r\n");return true;}
             ++meScans;std::string result;
             if(meScans==1) {
                 result="+CMTI: \"SM\",3\r\n+CMTI: \"ME\",2\r\n";
@@ -370,7 +407,7 @@ int main(){
                 char time[32];snprintf(time,sizeof(time),"6210610000%02X00",i);
                 result+="+CMGL: "+std::to_string(i+1)+",1,,20\r\n00000B915155214365F70000"+std::string(time)+"05E8329BFD06\r\n";
             }
-            Serial1.feed(result+"OK\r\n");return true;
+            platform::modemUart.feed(result+"OK\r\n");return true;
         };
         h.run();assert(h.smsReady() && store=="SM" && smScans==2 && meScans==2);
         unsigned received=0;for(const auto& e:h.events())if(e.kind==CellEventKind::SmsIn)++received;
@@ -385,7 +422,7 @@ int main(){
             if(cmd=="AT+CPMS=\"ME\"")store="ME";
             if(cmd=="AT+CPMS=\"SM\"")store="SM";
             if(cmd=="AT+CMGL=4" && store=="ME") {
-                ++meScans;Serial1.feed("+CMGL: 1,0,,20\r\n00000B915155214365F700006210610000000005E8329BFD06\r\nOK\r\n");return true;
+                ++meScans;platform::modemUart.feed("+CMGL: 1,0,,20\r\n00000B915155214365F700006210610000000005E8329BFD06\r\nOK\r\n");return true;
             }
             return false;
         };
@@ -407,21 +444,21 @@ int main(){
         h.custom=[&](const std::string& cmd,unsigned){
             if(cmd=="AT+CPMS=\"ME\"")store="ME";
             if(cmd=="AT+CPMS=\"SM\"")store="SM";
-            if(cmd=="AT+NETOPEN?"){Serial1.feed("+NETOPEN: 1\r\nOK\r\n");return true;}
+            if(cmd=="AT+NETOPEN?"){platform::modemUart.feed("+NETOPEN: 1\r\nOK\r\n");return true;}
             if(cmd.rfind("AT+CIPOPEN=9,",0)==0) {
-                Serial1.feed("+CIPOPEN: 8,0\r\n+CIPOPEN: 9,0\r\nOK\r\n");return true;
+                platform::modemUart.feed("+CIPOPEN: 8,0\r\n+CIPOPEN: 9,0\r\nOK\r\n");return true;
             }
-            if(cmd.rfind("AT+CIPSEND=9,",0)==0){Serial1.feed("> ");return true;}
+            if(cmd.rfind("AT+CIPSEND=9,",0)==0){platform::modemUart.feed("> ");return true;}
             if(cmd==ciphertext) {
-                Serial1.feed("+CIPSEND: 9,"+std::to_string(ciphertext.size())+","+std::to_string(ciphertext.size())+"\r\nOK\r\n");return true;
+                platform::modemUart.feed("+CIPSEND: 9,"+std::to_string(ciphertext.size())+","+std::to_string(ciphertext.size())+"\r\nOK\r\n");return true;
             }
             if(cmd=="AT+CIPRXGET=3,9,256") {
                 incoming=true;
-                Serial1.feed("+CMTI: \"SM\",3\r\n+CIPRXGET: 3,9,"+std::to_string(payload.size())+",0\r\n"+hex+"\r\nOK\r\n");return true;
+                platform::modemUart.feed("+CMTI: \"SM\",3\r\n+CIPRXGET: 3,9,"+std::to_string(payload.size())+",0\r\n"+hex+"\r\nOK\r\n");return true;
             }
-            if(cmd=="AT+CIPCLOSE=9"){Serial1.feed("OK\r\n+CIPCLOSE: 9,0\r\n");return true;}
+            if(cmd=="AT+CIPCLOSE=9"){platform::modemUart.feed("OK\r\n+CIPCLOSE: 9,0\r\n");return true;}
             if(cmd=="AT+CMGL=4" && store=="SM" && incoming) {
-                Serial1.feed("+CMGL: 3,0,,20\r\n00000B915155214365F700006210610000000005E8329BFD06\r\nOK\r\n");return true;
+                platform::modemUart.feed("+CMGL: 3,0,,20\r\n00000B915155214365F700006210610000000005E8329BFD06\r\nOK\r\n");return true;
             }
             return false;
         };
@@ -451,36 +488,114 @@ int main(){
         h.custom=[&](const std::string& cmd,unsigned){
             if(cmd=="AT+CPMS=\"ME\"")store="ME";
             if(cmd=="AT+CPMS=\"SM\"")store="SM";
-            if(cmd=="AT+NETOPEN?"){Serial1.feed("+NETOPEN: 0\r\nOK\r\n");return true;}
-            if(cmd=="AT+NETOPEN"){openedAt=current+200;Serial1.feed("OK\r\n");return true;}
-            if(cmd.rfind("AT+CIPOPEN=9,",0)==0){Serial1.feed("OK\r\n+CIPOPEN: 9,3\r\n");return true;}
+            if(cmd=="AT+NETOPEN?"){platform::modemUart.feed("+NETOPEN: 0\r\nOK\r\n");return true;}
+            if(cmd=="AT+NETOPEN"){openedAt=current+200;platform::modemUart.feed("OK\r\n");return true;}
+            if(cmd.rfind("AT+CIPOPEN=9,",0)==0){platform::modemUart.feed("OK\r\n+CIPOPEN: 9,3\r\n");return true;}
             if(cmd=="AT+CMGL=4" && store=="ME" && openedAt) {
-                Serial1.feed("+CMGL: 1,0,,20\r\n00000B915155214365F700006210610000000005E8329BFD06\r\nOK\r\n");return true;
+                platform::modemUart.feed("+CMGL: 1,0,,20\r\n00000B915155214365F700006210610000000005E8329BFD06\r\nOK\r\n");return true;
             }
             return false;
         };
         tickHook=[&]{
             if(current==500){request=cellTcpTestSubmit(CellTcpTestKind::Open,"example.test");assert(request);}
-            if(openedAt && current==openedAt)Serial1.feed("+CMTI: \"ME\",1\r\n+NETOPEN: 0\r\n");
+            if(openedAt && current==openedAt)platform::modemUart.feed("+CMTI: \"ME\",1\r\n+NETOPEN: 0\r\n");
             int result=0;std::string data;int64_t timestamp=0;
             if(request && cellTcpTestTake(request,result,data,timestamp)){assert(result==-1);request=nullptr;done=true;}
         };
         h.run();assert(done && h.smsReady() && store=="SM" && h.count["AT+NETOPEN"]==1 && h.totalPrefix("AT+CIPSEND=")==0);
-        unsigned received=0;for(const auto& e:h.events())if(e.kind==CellEventKind::SmsIn)++received;
+        unsigned received=0,failures=0;
+        for(const auto& e:h.events()) {
+            if(e.kind==CellEventKind::SmsIn)++received;
+            if(e.kind==CellEventKind::Trace) {
+                const std::string text=e.text;
+                assert(text.find("example.test")==std::string::npos && text.find("CIPOPEN=")==std::string::npos);
+                if(text.rfind("LTE socket failed:",0)==0) {
+                    ++failures;
+                    assert(text=="LTE socket failed: TCP open; asynchronous modem error; modem result=3");
+                }
+            }
+        }
+        assert(failures==1);
         assert(received==1 && h.totalPrefix("AT+CMGS=")==0);
-        std::cout<<"PASS delayed NETOPEN result and failed TCP connection retain interleaved ME notification without sending application data\n";
+        std::cout<<"PASS delayed NETOPEN and failed TCP retain ME notification with one sanitized stage diagnostic and no application data\n";
     }
     {
-        Harness h(7500);void* request=nullptr;bool cancelled=false;
+        Harness h(2000);void* request=nullptr;unsigned phase=0;bool networkOpen=false;
         h.custom=[&](const std::string& cmd,unsigned){
-            if(cmd=="AT+NETOPEN?"){Serial1.feed("+NETOPEN: 1\r\nOK\r\n");return true;}
-            if(cmd.rfind("AT+CIPOPEN=9,",0)==0){Serial1.feed("OK\r\n");return true;}
+            if(cmd=="AT+CIPMODE=0"){assert(false && "Do not rewrite mode while packet service is open");}
+            if(cmd=="AT+NETOPEN?"){platform::modemUart.feed(std::string("+NETOPEN: ")+(networkOpen?"1":"0")+"\r\nOK\r\n");return true;}
+            if(cmd=="AT+NETOPEN"){networkOpen=true;platform::modemUart.feed("OK\r\n+NETOPEN: 0\r\n");return true;}
+            if(cmd.rfind("AT+CIPOPEN=9,",0)==0){platform::modemUart.feed("OK\r\n+CIPOPEN: 9,0\r\n");return true;}
+            if(cmd=="AT+CIPCLOSE=9"){platform::modemUart.feed("OK\r\n+CIPCLOSE: 9,0\r\n");return true;}
             return false;
         };
         tickHook=[&]{
             if(current==500){request=cellTcpTestSubmit(CellTcpTestKind::Open,"example.test");assert(request);}
-            if(current==600)Serial1.feed("RDY\r\n");
-            if(current==700)Serial1.feed("+CIPOPEN: 9,0\r\n"); // Stale result from before the reset.
+            int result=0;std::string data;int64_t timestamp=0;
+            if(request && cellTcpTestTake(request,result,data,timestamp)) {
+                assert(result==1);request=nullptr;++phase;
+                if(phase==1 || phase==3)request=cellTcpTestSubmit(CellTcpTestKind::Close);
+                else if(phase==2)request=cellTcpTestSubmit(CellTcpTestKind::Open,"example.test");
+                if(phase<4)assert(request);
+            }
+        };
+        h.run();assert(phase==4 && networkOpen && h.count["AT+CIPMODE?"]==2 && h.count["AT+CIPMODE=0"]==0);
+        assert(h.count["AT+NETOPEN"]==1 && h.totalPrefix("AT+CIPOPEN=")==2 && h.count["AT+CIPCLOSE=9"]==2);
+        assert(h.totalPrefix("AT+CIPSEND=")==0 && h.totalPrefix("AT+NETCLOSE")==0 && h.count["AT+CFUN=1,1"]==0);
+        for(const auto& e:h.events())if(e.kind==CellEventKind::Trace)assert(std::string(e.text).rfind("LTE socket failed:",0)!=0);
+        std::cout<<"PASS two explicit TCP turns reuse NETOPEN without redundant mode writes, network close, reset or application sends\n";
+    }
+    {
+        Harness h(1000);void* request=nullptr;bool done=false,modeSet=false;
+        h.custom=[&](const std::string& cmd,unsigned){
+            if(cmd=="AT+CIPMODE?"){platform::modemUart.feed("+CIPMODE: 1\r\nOK\r\n");return true;}
+            if(cmd=="AT+CIPMODE=0")modeSet=true;
+            if(cmd=="AT+CIPRXGET=1")assert(modeSet);
+            if(cmd=="AT+NETOPEN?"){platform::modemUart.feed("+NETOPEN: 1\r\nOK\r\n");return true;}
+            if(cmd.rfind("AT+CIPOPEN=9,",0)==0){platform::modemUart.feed("OK\r\n+CIPOPEN: 9,0\r\n");return true;}
+            return false;
+        };
+        tickHook=[&]{
+            if(current==500){request=cellTcpTestSubmit(CellTcpTestKind::Open,"example.test");assert(request);}
+            int result=0;std::string data;int64_t timestamp=0;
+            if(request && cellTcpTestTake(request,result,data,timestamp)){assert(result==1);request=nullptr;done=true;}
+        };
+        h.run();assert(done && modeSet && h.count["AT+CIPMODE?"]==1 && h.count["AT+CIPMODE=0"]==1);
+        assert(h.totalPrefix("AT+CIPSEND=")==0 && h.totalPrefix("AT+NETCLOSE")==0);
+        std::cout<<"PASS queried transparent mode selects nontransparent mode once before continuing socket setup\n";
+    }
+    {
+        for(const std::string reply:{"", "+CIPMODE: 2\r\n", "+CIPMODE: 00\r\n", "+CIPMODE: \"0\"\r\n", "+CIPMODE: 0,1\r\n", "+CIPMODE: 0\r\n+CIPMODE: 1\r\n", "+CIPMODE: 0\r\nunexpected\r\n"}) {
+            Harness h(1000);void* request=nullptr;bool done=false;
+            h.custom=[&](const std::string& cmd,unsigned){
+                if(cmd=="AT+CIPMODE?"){platform::modemUart.feed(reply+"OK\r\n");return true;}
+                return false;
+            };
+            tickHook=[&]{
+                if(current==500){request=cellTcpTestSubmit(CellTcpTestKind::Open,"example.test");assert(request);}
+                int result=0;std::string data;int64_t timestamp=0;
+                if(request && cellTcpTestTake(request,result,data,timestamp)){assert(result==-1);request=nullptr;done=true;}
+            };
+            h.run();assert(done && h.count["AT+CIPMODE?"]==1 && h.count["AT+CIPMODE=0"]==0 && h.count["AT+CIPRXGET=1"]==0);
+            assert(h.totalPrefix("AT+NETOPEN")==0 && h.totalPrefix("AT+CIPOPEN=")==0 && h.totalPrefix("AT+CIPSEND=")==0);
+            unsigned failures=0;for(const auto& e:h.events())if(e.kind==CellEventKind::Trace && std::string(e.text).rfind("LTE socket failed:",0)==0) {
+                ++failures;assert(std::string(e.text)=="LTE socket failed: TCP mode query; invalid TCP mode; modem result=-1");
+            }
+            assert(failures==1);
+        }
+        std::cout<<"PASS missing, invalid, duplicate and unexpected TCP mode query replies fail closed without setup writes\n";
+    }
+    {
+        Harness h(7500);void* request=nullptr;bool cancelled=false;
+        h.custom=[&](const std::string& cmd,unsigned){
+            if(cmd=="AT+NETOPEN?"){platform::modemUart.feed("+NETOPEN: 1\r\nOK\r\n");return true;}
+            if(cmd.rfind("AT+CIPOPEN=9,",0)==0){platform::modemUart.feed("OK\r\n");return true;}
+            return false;
+        };
+        tickHook=[&]{
+            if(current==500){request=cellTcpTestSubmit(CellTcpTestKind::Open,"example.test");assert(request);}
+            if(current==600)platform::modemUart.feed("RDY\r\n");
+            if(current==700)platform::modemUart.feed("+CIPOPEN: 9,0\r\n"); // Stale result from before the reset.
             int result=0;std::string data;int64_t timestamp=0;
             if(request && cellTcpTestTake(request,result,data,timestamp)){assert(result==-1);request=nullptr;cancelled=true;}
         };
@@ -494,12 +609,12 @@ int main(){
         tickHook=[&]{
             if(current==500)h.action(CellActionKind::Sms,91);
             if(current==600){request=cellTcpTestSubmit(CellTcpTestKind::Open,"example.test",443,500);assert(request);}
-            if(current==2000)Serial1.feed("+CMGS: 91\r\nOK\r\n");
+            if(current==2000)platform::modemUart.feed("+CMGS: 91\r\nOK\r\n");
             int result=0;std::string data;int64_t timestamp=0;
             if(request && cellTcpTestTake(request,result,data,timestamp)){assert(result==-1);request=nullptr;expired=true;}
         };
         h.run();assert(expired && h.smsReady() && h.totalPrefix("AT+CMGS=")==1);
-        assert(h.count["AT+CIPMODE=0"]==0 && h.totalPrefix("AT+CIPOPEN=")==0 && h.count["AT+CFUN=1,1"]==0);
+        assert(h.count["AT+CIPMODE?"]==0 && h.count["AT+CIPMODE=0"]==0 && h.totalPrefix("AT+CIPOPEN=")==0 && h.count["AT+CFUN=1,1"]==0);
         std::cout<<"PASS socket request expires while waiting behind an SMS and never starts a stale network operation or resends SMS\n";
     }
 #endif

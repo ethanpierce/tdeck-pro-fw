@@ -1,8 +1,0 @@
-{
-  "name": "GxEPD2",
-  "version": "1.5.5",
-  "description": "LILYGO-pinned GDEQ031T10-only subset; see THIRD_PARTY.md",
-  "frameworks": "arduino",
-  "platforms": "espressif32",
-  "dependencies": {"adafruit/Adafruit GFX Library": "1.11.11"}
-}

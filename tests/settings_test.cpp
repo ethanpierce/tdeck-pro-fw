@@ -49,6 +49,27 @@ int main() {
     assert(wirelessRestart.wireless().bleEnabled && std::string(wirelessRestart.wireless().ssid)=="Test network");
     assert(std::string(wirelessRestart.values().apn)=="fast.t-mobile.com");
     assert(wirelessRestart.values().keyboardLight); // New settings preserve the old layout and values.
+    assert(!wirelessRestart.radios().airplane && !wirelessRestart.radios().gpsEnabled && !wirelessRestart.mesh().enabled);
+    const auto credentials=fakeNvs::blobs["decksettings/wireless"];
+    const auto lighting=fakeNvs::blobs["decksettings/options"];
+    auto radios=wirelessRestart.radios();radios.airplane=1;radios.gpsEnabled=1;
+    assert(wirelessRestart.saveRadios(radios));
+    DeviceSettings radioRestart;radioRestart.begin();
+    assert(radioRestart.radios().airplane && radioRestart.radios().gpsEnabled);
+    assert(fakeNvs::blobs["decksettings/wireless"]==credentials && fakeNvs::blobs["decksettings/options"]==lighting);
+    auto mesh=radioRestart.mesh();mesh.enabled=1;mesh.region=deck::MeshRegion::US;
+    assert(radioRestart.saveMesh(mesh));
+    DeviceSettings meshRestart;meshRestart.begin();assert(meshRestart.mesh().enabled && meshRestart.mesh().region==deck::MeshRegion::US);
+    assert(meshRestart.radios().airplane && meshRestart.wireless().bleEnabled);
+    mesh.hopLimit=99;assert(!meshRestart.saveMesh(mesh));
+    fakeNvs::blobs["decksettings/mesh"][5]^=1;
+    DeviceSettings badMesh;badMesh.begin();assert(!badMesh.mesh().enabled && badMesh.radios().airplane);
+    fakeNvs::blobs["decksettings/radios"][4]^=1;
+    DeviceSettings badRadio;badRadio.begin();assert(badRadio.radios().airplane && !badRadio.radios().gpsEnabled);
+    fakeNvs::blobs["decksettings/radios"].pop_back();
+    DeviceSettings truncatedRadio;truncatedRadio.begin();assert(truncatedRadio.radios().airplane);
+    fakeNvs::blobs["decksettings/radios"].clear();
+    DeviceSettings emptyRadio;emptyRadio.begin();assert(emptyRadio.radios().airplane);
     fakeNvs::failWrites=true;wireless.wifiEnabled=0;
     assert(!wirelessRestart.saveWireless(wireless) && wirelessRestart.wireless().wifiEnabled);
     fakeNvs::failWrites=false;

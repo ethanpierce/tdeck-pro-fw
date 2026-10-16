@@ -12,7 +12,7 @@ flags=(-std=c++17 -Wall -Wextra -Werror -g -O1
   lib/DeckCore/src/sms_pdu.cpp lib/DeckCore/src/at_engine.cpp lib/DeckCore/src/apn.cpp lib/DeckCore/src/connectivity.cpp -o build/modem_service_test
 "${CXX:-g++}" "${flags[@]}" -Itests/fakes -Isrc tests/settings_test.cpp \
   src/device_settings.cpp lib/DeckCore/src/apn.cpp lib/DeckCore/src/sms_pdu.cpp \
-  lib/DeckCore/src/at_engine.cpp lib/DeckCore/src/connectivity.cpp -o build/settings_test
+  lib/DeckCore/src/at_engine.cpp lib/DeckCore/src/connectivity.cpp lib/DeckCore/src/mesh_protocol.cpp -o build/settings_test
 "${CXX:-g++}" "${flags[@]}" tests/connectivity_test.cpp \
   lib/DeckCore/src/connectivity.cpp lib/DeckCore/src/at_engine.cpp -o build/connectivity_test
 "${CXX:-g++}" "${flags[@]}" -Itests/fakes -Isrc tests/ai_chat_test.cpp \
@@ -24,6 +24,15 @@ flags=(-std=c++17 -Wall -Wextra -Werror -g -O1
 "${CXX:-g++}" "${flags[@]}" tests/cellular_http_test.cpp \
   lib/DeckCore/src/cellular_http_protocol.cpp lib/DeckCore/src/ai_protocol.cpp \
   lib/DeckCore/src/at_engine.cpp -o build/cellular_http_test
+"${CXX:-g++}" "${flags[@]}" tests/ui_input_test.cpp -o build/ui_input_test
+"${CXX:-g++}" "${flags[@]}" -Itests/fakes/display -Isrc tests/native_ui_test.cpp \
+  src/native_screen.cpp lib/DeckCore/src/mono_canvas.cpp -o build/native_ui_test
+"${CXX:-g++}" "${flags[@]}" tests/mesh_protocol_test.cpp \
+  lib/DeckCore/src/mesh_protocol.cpp -o build/mesh_protocol_test
+"${CXX:-g++}" "${flags[@]}" tests/radio_gate_test.cpp -o build/radio_gate_test
+"${CXX:-g++}" "${flags[@]}" tests/nmea_test.cpp lib/DeckCore/src/nmea.cpp -o build/nmea_test
+"${CXX:-g++}" "${flags[@]}" -Itests/fakes/gps -Isrc tests/gps_service_test.cpp \
+  src/gps_service.cpp lib/DeckCore/src/nmea.cpp -o build/gps_service_test
 # LeakSanitizer cannot attach under some sandbox ptrace policies; ASan/UBSan run normally.
 ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}" ./build/core_test
 ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}" ./build/store_test
@@ -34,3 +43,9 @@ ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}" ./build/ai_chat_test
 ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}" ./build/conversations_test
 ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}" ./build/touch_test
 ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}" ./build/cellular_http_test
+ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}" ./build/ui_input_test
+ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}" ./build/native_ui_test
+ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}" ./build/mesh_protocol_test
+ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}" ./build/radio_gate_test
+ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}" ./build/nmea_test
+ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}" ./build/gps_service_test

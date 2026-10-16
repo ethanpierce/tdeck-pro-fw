@@ -1,5 +1,5 @@
 #pragma once
-#include <Arduino.h>
+#include <cstdint>
 #include <touch_packet.h>
 class TouchInput {
 public:

@@ -6,6 +6,7 @@ Edge; Python/PlatformIO are maintainer-side release dependencies.
 """
 
 import argparse
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
 import html
@@ -28,7 +29,7 @@ ESP_WEB_TOOLS_VERSION = "10.4.0"
 VERSION_PATTERN = r"v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?"
 SITE_FILES = ("index.html", "style.css", "app.js", "ai-setup.html", "ai-setup.js")
 PARTS = (("bootloader.bin", 0x0), ("partitions.bin", 0x8000),
-         ("boot_app0.bin", 0xE000), ("firmware.bin", 0x10000))
+         ("ota_data_initial.bin", 0xE000), ("firmware.bin", 0x10000))
 # Type, subtype, offset, size. The NVS gap must stay unwritten by the installer.
 EXPECTED_PARTITIONS = {
     "nvs": (1, 2, 0x9000, 0x5000),
@@ -90,11 +91,14 @@ def validate_images(images):
                 raise ValueError(f"{name} is not DIO; do not publish an unpatched web image")
         end = offset + len(data)
         limit = {"bootloader.bin": 0x8000, "partitions.bin": 0x9000,
-                 "boot_app0.bin": 0x10000, "firmware.bin": 0x610000}[name]
+                 "ota_data_initial.bin": 0x10000, "firmware.bin": 0x610000}[name]
         if end > limit:
             raise ValueError(f"{name} overlaps another partition or the protected NVS gap")
-    if images["boot_app0.bin"].stat().st_size != 0x2000:
-        raise ValueError("Unexpected boot_app0.bin size (expected 8192 bytes)")
+    if images["ota_data_initial.bin"].stat().st_size != 0x2000:
+        raise ValueError("Unexpected native OTA metadata size (expected 8192 bytes)")
+
+    if images["ota_data_initial.bin"].read_bytes() != b"\xff" * 0x2000:
+        raise ValueError("Native OTA metadata must be the empty initial 8192-byte image")
 
     table = images["partitions.bin"].read_bytes()
     found = {}
@@ -110,6 +114,48 @@ def validate_images(images):
         found[name] = (kind, subtype, offset, size)
     if found != EXPECTED_PARTITIONS:
         raise ValueError("Partition layout changed; review all release offsets before packaging")
+
+
+def validate_native_build(build):
+    description = json.loads((build / "project_description.json").read_text())
+    components = description.get("build_components", [])
+    if (description.get("target") != "esp32s3" or "arduino" in components or
+            description.get("git_revision") != "5.4.0"):
+        raise ValueError("Release requires the pinned native ESP-IDF 5.4.0 build with no Arduino component")
+    settings_path = build / "config/sdkconfig.json"
+    settings = json.loads(settings_path.read_text())
+    required = {"IDF_TARGET": "esp32s3", "ESPTOOLPY_FLASHSIZE": "16MB",
+                "ESPTOOLPY_FLASHMODE": "dio", "PARTITION_TABLE_OFFSET": 0x8000,
+                "PARTITION_TABLE_CUSTOM_FILENAME": "partitions.csv", "SPIRAM": True,
+                "SPIRAM_MODE_QUAD": True, "SPIRAM_SPEED": 80,
+                "MBEDTLS_CERTIFICATE_BUNDLE": True, "MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL": True,
+                "ESP_CONSOLE_USB_SERIAL_JTAG": True, "ESP_MAIN_TASK_AFFINITY": 1,
+                "COMPILER_OPTIMIZATION_PERF": True, "COMPILER_OPTIMIZATION_DEBUG": False,
+                "COMPILER_OPTIMIZATION_ASSERTIONS_ENABLE": True,
+                "COMPILER_OPTIMIZATION_ASSERTION_LEVEL": 2,
+                "ESP_INT_WDT": True, "ESP_TASK_WDT_EN": True}
+    if any(settings.get(key) != value for key, value in required.items()) or settings.get("ESP_TLS_INSECURE"):
+        raise ValueError("Native SDK settings do not match the reviewed hardware/TLS configuration")
+    return sha256(settings_path)
+
+
+@contextmanager
+def fresh_sdkconfig(root):
+    """Release builds use committed defaults while preserving local menuconfig."""
+    paths = [root / "sdkconfig.tdeck-pro", root / "sdkconfig.tdeck-pro.old"]
+    saved = {path: path.read_bytes() if path.exists() else None for path in paths}
+    try:
+        for path in paths:
+            if path.exists():
+                path.unlink()
+        yield
+    finally:
+        for path, value in saved.items():
+            if value is None:
+                if path.exists():
+                    path.unlink()
+            else:
+                path.write_bytes(value)
 
 
 def zip_directory(source, destination, prefix, epoch):
@@ -217,7 +263,8 @@ Keep phone numbers, IMEIs, SIM identifiers, Wi-Fi credentials and API keys priva
 """
 
 
-def stage_release(root, output, images, version, repository, site_url, commit, epoch, pio_version):
+def stage_release(root, output, images, version, repository, site_url, commit, epoch, pio_version,
+                  sdkconfig_hash="fixture"):
     """Stage verified inputs. The caller owns clean-source/build verification."""
     validate_images(images)
     stem = f"Handheld-OS-{version}"
@@ -246,6 +293,10 @@ def stage_release(root, output, images, version, repository, site_url, commit, e
         "source_url": f"https://github.com/{repository}/tree/{commit}",
         "source_archive": downloads["source"], "license": "GPL-3.0-only",
         "build_environment": ENVIRONMENT, "platformio": pio_version,
+        "framework": "ESP-IDF", "framework_version": "5.4.0",
+        "compiler_optimization": "O2", "assertions_enabled": True,
+        "sdkconfig_defaults_sha256": sha256(root / "sdkconfig.defaults"),
+        "effective_sdkconfig_sha256": sdkconfig_hash,
         "platformio_ini_sha256": sha256(root / "platformio.ini"),
         "source_date_epoch": epoch,
         "packaged_utc": datetime.now(timezone.utc).isoformat(),
@@ -314,7 +365,8 @@ def self_test():
         fixture = temp / "fixture"
         fixture.mkdir()
         shutil.copytree(ROOT / "installer", fixture / "installer")
-        (fixture / "platformio.ini").write_text("[env:tdeck-pro]\n", encoding="utf-8")
+        (fixture / "platformio.ini").write_text("[env:tdeck-pro]\nframework = espidf\n", encoding="utf-8")
+        (fixture / "sdkconfig.defaults").write_text("CONFIG_IDF_TARGET=\"esp32s3\"\n", encoding="utf-8")
         (fixture / "LICENSE").write_text("fixture license\n", encoding="utf-8")
         (fixture / "THIRD_PARTY.md").write_text("fixture notices\n", encoding="utf-8")
         (fixture / "docs/licenses").mkdir(parents=True)
@@ -334,13 +386,45 @@ def self_test():
         struct.pack_into("<H", header, 12, 9)
         for name in ("bootloader.bin", "firmware.bin"):
             (binaries / name).write_bytes(header + b"\0" * 256)
-        (binaries / "boot_app0.bin").write_bytes(b"\xff" * 0x2000)
+        (binaries / "ota_data_initial.bin").write_bytes(b"\xff" * 0x2000)
         table = bytearray()
         for name, (kind, subtype, offset, size) in EXPECTED_PARTITIONS.items():
             table.extend(struct.pack("<HBBII16sI", 0x50AA, kind, subtype, offset, size,
                                      name.encode("ascii"), 0))
         table.extend(b"\xff" * 32)
         (binaries / "partitions.bin").write_bytes(table)
+        native = temp / "native-build"
+        (native / "config").mkdir(parents=True)
+        description = {"target": "esp32s3", "git_revision": "5.4.0", "build_components": ["src", "bt", "driver"]}
+        settings = {"IDF_TARGET": "esp32s3", "ESPTOOLPY_FLASHSIZE": "16MB", "ESPTOOLPY_FLASHMODE": "dio",
+                    "PARTITION_TABLE_OFFSET": 0x8000, "PARTITION_TABLE_CUSTOM_FILENAME": "partitions.csv",
+                    "SPIRAM": True, "SPIRAM_MODE_QUAD": True, "SPIRAM_SPEED": 80,
+                    "MBEDTLS_CERTIFICATE_BUNDLE": True, "MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL": True,
+                    "ESP_CONSOLE_USB_SERIAL_JTAG": True, "ESP_MAIN_TASK_AFFINITY": 1,
+                    "COMPILER_OPTIMIZATION_PERF": True, "COMPILER_OPTIMIZATION_DEBUG": False,
+                    "COMPILER_OPTIMIZATION_ASSERTIONS_ENABLE": True, "COMPILER_OPTIMIZATION_ASSERTION_LEVEL": 2,
+                    "ESP_INT_WDT": True, "ESP_TASK_WDT_EN": True, "ESP_TLS_INSECURE": False}
+        write_json(native / "project_description.json", description)
+        write_json(native / "config/sdkconfig.json", settings)
+        assert validate_native_build(native) == sha256(native / "config/sdkconfig.json")
+        description["build_components"].append("arduino")
+        write_json(native / "project_description.json", description)
+        try:
+            validate_native_build(native)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Arduino framework fixture was accepted")
+        (fixture / "sdkconfig.tdeck-pro").write_bytes(b"local menuconfig")
+        try:
+            with fresh_sdkconfig(fixture):
+                assert not (fixture / "sdkconfig.tdeck-pro").exists()
+                (fixture / "sdkconfig.tdeck-pro").write_bytes(b"release generated config")
+                raise RuntimeError("simulated failed build")
+        except RuntimeError:
+            pass
+        assert (fixture / "sdkconfig.tdeck-pro").read_bytes() == b"local menuconfig"
+        (fixture / "sdkconfig.tdeck-pro").unlink()
         images = {name: binaries / name for name, _ in PARTS}
         output = temp / "release"
         info = stage_release(fixture, output, images, "v0.1.0", "ethanpierce/tdeck-pro-fw",
@@ -387,7 +471,7 @@ def self_test():
             pass
         else:
             raise AssertionError("Invalid partition table fixture was accepted")
-    print("Release fixture tests passed: target/layout checks, OS ZIP contents/checksums, exact source archive and erase defaults.")
+    print("Release fixture tests passed: native SDK/layout checks, restored local config, OS ZIP checksums, exact source archive and erase defaults.")
 
 
 def main():
@@ -431,19 +515,20 @@ def main():
     pio_version = run(pio, "--version", env=env)
     print(f"Release {args.version} from clean commit {commit}", flush=True)
     # Always clean first: an old prebuilt image must never masquerade as HEAD.
-    subprocess.run([pio, "run", "-e", ENVIRONMENT, "-t", "clean"], cwd=ROOT, env=env, check=True)
-    subprocess.run([pio, "run", "-e", ENVIRONMENT], cwd=ROOT, env=env, check=True)
+    with fresh_sdkconfig(ROOT):
+        subprocess.run([pio, "run", "-e", ENVIRONMENT, "-t", "clean"], cwd=ROOT, env=env, check=True)
+        subprocess.run([pio, "run", "-e", ENVIRONMENT], cwd=ROOT, env=env, check=True)
     if run("git", "status", "--porcelain", "--untracked-files=normal") or run("git", "rev-parse", "HEAD") != commit:
         parser.error("Source changed during build; finish changes, commit and rebuild the release")
     build = ROOT / ".pio" / "build" / ENVIRONMENT
     images = {name: build / name for name, _ in PARTS}
-    images["boot_app0.bin"] = args.core_dir.resolve() / "packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin"
+    sdkconfig_hash = validate_native_build(build)
     validate_images(images)
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="handheld-os-release-", dir=output.parent) as temporary:
         stage = Path(temporary) / "output"
         info = stage_release(ROOT, stage, images, args.version, args.repository,
-                             args.site_url, commit, epoch, pio_version)
+                             args.site_url, commit, epoch, pio_version, sdkconfig_hash)
         if run("git", "status", "--porcelain", "--untracked-files=normal") or run("git", "rev-parse", "HEAD") != commit:
             parser.error("Source changed during packaging; no release files were published")
         stage.rename(output)

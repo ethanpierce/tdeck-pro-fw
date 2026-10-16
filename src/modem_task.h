@@ -1,5 +1,5 @@
 #pragma once
-#include <Arduino.h>
+#include <platform.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <atomic>
@@ -20,4 +20,7 @@ struct CellAction {
 };
 extern QueueHandle_t cellEvents, cellActions;
 extern std::atomic<uint32_t> droppedCellEvents;
-bool startCellTask();
+bool startCellTask(const char* savedApn="");
+// Independent of the action queue: power-off cannot wait behind a carrier scan.
+void cellSuspendForAirplane(bool suspended);
+bool cellAirplaneStopped();

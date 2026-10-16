@@ -1,5 +1,5 @@
 #pragma once
-#include <Preferences.h>
+#include "nvs_store.h"
 #include <ai_protocol.h>
 class AiSettings {
 public:
@@ -10,6 +10,8 @@ public:
     const deck::AiConfig& values()const{return value_;}
     bool persistent=false;
 private:
-    Preferences prefs_;
+    NvsStore prefs_;
     deck::AiConfig value_{};
 };
+
+static_assert(sizeof(deck::AiConfig)==552, "Keep the existing NVS AI configuration layout");

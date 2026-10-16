@@ -8,7 +8,7 @@
 #include <sys/time.h>
 #include <ctime>
 #include <algorithm>
-extern "C" esp_err_t esp_crt_bundle_attach(void* conf);
+#include <esp_crt_bundle.h>
 
 namespace {
 constexpr uint32_t RequestMillis=120000;
@@ -16,10 +16,10 @@ deck::AiReply failure(const char* message){deck::AiReply result;result.error=mes
 void wipe(std::string& value){volatile char* data=value.empty()?nullptr:&value[0];for(size_t n=0;n<value.size();++n)data[n]=0;value.clear();}
 struct Tls {
     mbedtls_ssl_context ssl;mbedtls_ssl_config config;mbedtls_entropy_context entropy;mbedtls_ctr_drbg_context random;
-    uint32_t started=millis();bool connected=false;
+    uint32_t started=platform::millis();bool connected=false;
     Tls(){mbedtls_ssl_init(&ssl);mbedtls_ssl_config_init(&config);mbedtls_entropy_init(&entropy);mbedtls_ctr_drbg_init(&random);}
     ~Tls(){mbedtls_ssl_free(&ssl);mbedtls_ssl_config_free(&config);mbedtls_ctr_drbg_free(&random);mbedtls_entropy_free(&entropy);if(connected)cellTcpClose();}
-    bool expired()const{return uint32_t(millis()-started)>=RequestMillis;}
+    bool expired()const{return uint32_t(platform::millis()-started)>=RequestMillis;}
     static int send(void* opaque,const unsigned char* bytes,size_t length) {
         auto& self=*static_cast<Tls*>(opaque);if(self.expired()){return MBEDTLS_ERR_NET_SEND_FAILED;}
         const int sent=cellTcpWrite(bytes,length);return sent>0?sent:MBEDTLS_ERR_NET_SEND_FAILED;
@@ -41,7 +41,7 @@ deck::AiReply cellularAiRequest(const std::string& url,const std::string& key,co
         if(timestamp<1704067200){return failure("LTE clock unavailable. Connect Wi-Fi once to set time.");}
         timeval time{time_t(timestamp),0};if(settimeofday(&time,nullptr)!=0){return failure("Could not set the HTTPS verification clock.");}
     }
-    if(ESP.getFreeHeap()<100000){return failure("Not enough memory for LTE HTTPS. Turn Bluetooth off.");}
+    if(platform::freeHeap()<100000){return failure("Not enough memory for LTE HTTPS. Turn Bluetooth off.");}
     Tls tls;
     if(!cellTcpOpen(address.host,address.port)){return failure("LTE TCP failed. Check data/APN or restart the modem.");}
     tls.connected=true;
@@ -50,7 +50,7 @@ deck::AiReply cellularAiRequest(const std::string& url,const std::string& key,co
        mbedtls_ssl_config_defaults(&tls.config,MBEDTLS_SSL_IS_CLIENT,MBEDTLS_SSL_TRANSPORT_STREAM,MBEDTLS_SSL_PRESET_DEFAULT)!=0)
         return failure("Could not initialize LTE TLS. No API request sent.");
     mbedtls_ssl_conf_authmode(&tls.config,MBEDTLS_SSL_VERIFY_REQUIRED);
-    mbedtls_ssl_conf_min_version(&tls.config,MBEDTLS_SSL_MAJOR_VERSION_3,MBEDTLS_SSL_MINOR_VERSION_3);
+    mbedtls_ssl_conf_min_tls_version(&tls.config,MBEDTLS_SSL_VERSION_TLS1_2);
     mbedtls_ssl_conf_rng(&tls.config,mbedtls_ctr_drbg_random,&tls.random);
     if(esp_crt_bundle_attach(&tls.config)!=ESP_OK || mbedtls_ssl_setup(&tls.ssl,&tls.config)!=0 ||
        mbedtls_ssl_set_hostname(&tls.ssl,address.host.c_str())!=0)
@@ -60,7 +60,7 @@ deck::AiReply cellularAiRequest(const std::string& url,const std::string& key,co
     while((result=mbedtls_ssl_handshake(&tls.ssl))!=0) {
         if(tls.expired() || (result!=MBEDTLS_ERR_SSL_WANT_READ && result!=MBEDTLS_ERR_SSL_WANT_WRITE))
             return failure("LTE TLS verification/handshake failed. No API request sent.");
-        delay(10);
+        platform::delay(10);
     }
     if(mbedtls_ssl_get_verify_result(&tls.ssl)!=0){return failure("LTE TLS certificate rejected. No API request sent.");}
 
@@ -73,7 +73,7 @@ deck::AiReply cellularAiRequest(const std::string& url,const std::string& key,co
     while(sent<request.size() && !tls.expired()) {
         result=mbedtls_ssl_write(&tls.ssl,reinterpret_cast<const unsigned char*>(request.data()+sent),std::min(size_t(1024),request.size()-sent));
         if(result>0)sent+=size_t(result);
-        else if(result==MBEDTLS_ERR_SSL_WANT_READ || result==MBEDTLS_ERR_SSL_WANT_WRITE)delay(10);
+        else if(result==MBEDTLS_ERR_SSL_WANT_READ || result==MBEDTLS_ERR_SSL_WANT_WRITE)platform::delay(10);
         else break;
     }
     const bool written=sent==request.size();wipe(request);
@@ -82,7 +82,7 @@ deck::AiReply cellularAiRequest(const std::string& url,const std::string& key,co
     while(!tls.expired() && !response.done()) {
         result=mbedtls_ssl_read(&tls.ssl,buffer,sizeof(buffer));
         if(result>0){if(!response.feed(reinterpret_cast<const char*>(buffer),size_t(result)))break;}
-        else if(result==MBEDTLS_ERR_SSL_WANT_READ || result==MBEDTLS_ERR_SSL_WANT_WRITE)delay(20);
+        else if(result==MBEDTLS_ERR_SSL_WANT_READ || result==MBEDTLS_ERR_SSL_WANT_WRITE)platform::delay(20);
         else {response.eof(result==MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY);break;}
     }
     if(!response.done()){return failure("LTE response incomplete/over limit; result unknown. No retry sent.");}
