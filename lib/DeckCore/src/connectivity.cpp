@@ -60,12 +60,15 @@ bool keyboardLayout(const uint8_t* map,size_t size,uint8_t reportId,HidKeyboardL
                 auto bit=offsets[g.id];
                 if(g.id==reportId && g.page==7 && !(value&1)) {
                     if((value&2) && g.bits==1 && g.count==8 && bit%8==0 && haveMin && haveMax && usageMin==224 && usageMax==231) {
-                        if(mod)return false;result.modifier=bit/8;mod=true;
+                        if(mod)return false;
+                        result.modifier=bit/8;mod=true;
                     } else if(!(value&2) && g.bits==8 && g.count>=1 && g.count<=16 && bit%8==0) {
-                        if(keys)return false;result.keys=bit/8;result.count=g.count;keys=true;
+                        if(keys)return false;
+                        result.keys=bit/8;result.count=g.count;keys=true;
                     } else if((value&2) && g.bits==1 && g.count>=1 && g.count<=232 && haveMin && haveMax &&
                               usageMin<=231 && usageMax<=231 && usageMax>=usageMin && usageMax-usageMin+1==g.count) {
-                        if(keys)return false;result.keys=bit;result.count=g.count;result.bitmap=1;result.firstUsage=usageMin;keys=true;
+                        if(keys)return false;
+                        result.keys=bit;result.count=g.count;result.bitmap=1;result.firstUsage=usageMin;keys=true;
                     } else return false;
                 }
                 offsets[g.id]+=g.bits*g.count;
